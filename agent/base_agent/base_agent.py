@@ -256,7 +256,7 @@ class BaseAgent:
             openai_api_key: OpenAI API key
             initial_cash: Initial cash amount
             init_date: Initialization date
-            market: Market type, "us" for US stocks or "cn" for A-shares
+            market: Market type. The current repo supports the U.S. path only.
             verbose: Enable verbose output for LangChain agent
             sentiment_mode: 'trend_following', 'contrarian', or None to disable
                             sentiment-based temperature. Uses MAGS/QQQ put/call ratio.
@@ -266,16 +266,9 @@ class BaseAgent:
         self.basemodel = basemodel
         self.market = market
 
-        # Auto-select stock symbols based on market if not provided
+        # Auto-select stock symbols when not provided.
         if stock_symbols is None:
-            if market == "cn":
-                # Import A-shares symbols when needed
-                from prompts.agent_prompt import all_sse_50_symbols
-
-                self.stock_symbols = all_sse_50_symbols
-            else:
-                # Default to US NASDAQ 100
-                self.stock_symbols = self.DEFAULT_STOCK_SYMBOLS
+            self.stock_symbols = self.DEFAULT_STOCK_SYMBOLS
         else:
             self.stock_symbols = stock_symbols
 

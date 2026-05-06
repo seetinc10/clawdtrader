@@ -25,32 +25,20 @@ mcp = FastMCP("TechnicalIndicators")
 # ---------------------------------------------------------------------------
 
 def _detect_market(symbol: str) -> str:
-    """Return 'us', 'cn', or 'crypto' based on symbol suffix."""
-    if symbol.endswith(".SH") or symbol.endswith(".SZ"):
-        return "cn"
-    if symbol.endswith("-USDT"):
-        return "crypto"
+    """Return the active market type for the current repo."""
     return "us"
 
 
 def _workspace_data_path(filename: str, symbol: Optional[str] = None) -> Path:
-    """Resolve JSONL data path by market (mirrors tool_get_price_local.py)."""
+    """Resolve the JSONL data path for the U.S. dataset."""
     base_dir = Path(__file__).resolve().parents[1]
-
-    if symbol and (symbol.endswith(".SH") or symbol.endswith(".SZ")):
-        return base_dir / "data" / "A_stock" / filename
-    elif symbol and symbol.endswith("-USDT"):
-        crypto_filename = "crypto_merged.jsonl" if filename == "merged.jsonl" else filename
-        return base_dir / "data" / "crypto" / crypto_filename
-    else:
-        return base_dir / "data" / filename
+    return base_dir / "data" / filename
 
 
 def _extract_ohlcv(bar: dict, market: str, is_intraday: bool = False) -> Dict[str, float]:
     """Normalize field names into a standard OHLCV dict.
 
-    US intraday uses '1. open' / '4. close'.
-    Crypto and CN daily use '1. buy price' / '4. sell price'.
+    U.S. intraday uses '1. open' / '4. close'.
     """
     if is_intraday:
         # Intraday (60min) format: "1. open", "4. close"
@@ -78,8 +66,6 @@ def _load_historical_bars(symbol: str, anchor_date: str, num_periods: int) -> Li
     For US stocks the merged.jsonl contains hourly data keyed under
     'Time Series (60min)'.  We aggregate to daily bars (one bar per
     calendar day) so indicators work on a daily timeframe.
-
-    For crypto / CN the data is already daily under 'Time Series (Daily)'.
 
     Returns normalised OHLCV dicts sorted oldest-first.
     """

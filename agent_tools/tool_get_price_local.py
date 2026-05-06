@@ -24,30 +24,17 @@ from tools.general_tools import get_config_value
 
 
 def _workspace_data_path(filename: str, symbol: Optional[str] = None) -> Path:
-    """Get data file path based on symbol (auto-detect market type).
+    """Get the local U.S. data file path.
 
     Args:
         filename: Data filename (e.g., 'merged.jsonl')
-        symbol: Stock symbol for auto-detecting market type.
-                If symbol ends with .SH or .SZ, use A-stock data path.
-                If symbol ends with -USDT, use crypto data path.
+        symbol: Unused compatibility argument.
 
     Returns:
         Path to the data file
     """
     base_dir = Path(__file__).resolve().parents[1]
-
-    # Auto-detect market type from symbol
-    if symbol and (symbol.endswith(".SH") or symbol.endswith(".SZ")):
-        # Chinese A-shares
-        return base_dir / "data" / "A_stock" / filename
-    elif symbol and symbol.endswith("-USDT"):
-        # Cryptocurrencies
-        crypto_filename = "crypto_merged.jsonl" if filename == "merged.jsonl" else filename
-        return base_dir / "data" / "crypto" / crypto_filename
-    else:
-        # US stocks (default)
-        return base_dir / "data" / filename
+    return base_dir / "data" / filename
 
 
 def _validate_date_daily(date_str: str) -> None:

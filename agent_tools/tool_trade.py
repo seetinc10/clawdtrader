@@ -71,7 +71,7 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
     """
     Buy stock function
 
-    This function simulates stock buying operations, including the following steps:
+    This function simulates U.S. stock buying operations, including the following steps:
     1. Get current position and operation ID
     2. Get stock opening price for the day
     3. Validate buy conditions (sufficient cash, lot size for CN market)
@@ -80,8 +80,7 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
 
     Args:
         symbol: Stock symbol, such as "AAPL", "MSFT", etc.
-        amount: Buy quantity, must be a positive integer, indicating how many shares to buy
-                For Chinese A-shares (symbols ending with .SH or .SZ), must be multiples of 100
+        amount: Buy quantity, must be a positive integer share count
 
     Returns:
         Dict[str, Any]:
@@ -94,8 +93,6 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
     Example:
         >>> result = buy("AAPL", 10)
         >>> print(result)  # {"AAPL": 110, "MSFT": 5, "CASH": 5000.0, ...}
-        >>> result = buy("600519.SH", 100)  # Chinese A-shares must be multiples of 100
-        >>> print(result)  # {"600519.SH": 100, "CASH": 85000.0, ...}
     """
     # Step 1: Get environment variables and basic information
     # Get signature (model name) from environment variable, used to determine data storage path
@@ -106,11 +103,7 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
     # Get current trading date from environment variable
     today_date = get_config_value("TODAY_DATE")
 
-    # Auto-detect market type based on symbol format
-    if symbol.endswith((".SH", ".SZ")):
-        market = "cn"
-    else:
-        market = "us"
+    market = "us"
 
     # Amount validation for stocks
     try:
@@ -128,16 +121,6 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
             "symbol": symbol,
             "amount": amount,
             "date": today_date,
-        }
-
-    # 🇨🇳 Chinese A-shares trading rule: Must trade in lots of 100 shares (一手 = 100股)
-    if market == "cn" and amount % 100 != 0:
-        return {
-            "error": f"Chinese A-shares must be traded in multiples of 100 shares (1 lot = 100 shares). You tried to buy {amount} shares.",
-            "symbol": symbol,
-            "amount": amount,
-            "date": today_date,
-            "suggestion": f"Please use {(amount // 100) * 100} or {((amount // 100) + 1) * 100} shares instead.",
         }
 
     # Acquire lock for atomic read-validate-modify-write on positions
@@ -174,7 +157,7 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
             if k == "CASH":
                 continue
             try:
-                sym_price = get_open_prices(today_date, [k], market="cn" if k.endswith((".SH", ".SZ")) else "us").get(f"{k}_price", 0)
+                sym_price = get_open_prices(today_date, [k], market="us").get(f"{k}_price", 0)
                 if sym_price:
                     portfolio_value += v * sym_price
             except Exception:
@@ -243,60 +226,21 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
     return new_position
 
 
-def _get_today_buy_amount(symbol: str, today_date: str, signature: str) -> int:
-    """
-    Helper function to get the total amount bought today for T+1 restriction check
-
-    Args:
-        symbol: Stock symbol
-        today_date: Trading date
-        signature: Model signature
-
-    Returns:
-        Total shares bought today
-    """
-    log_path = get_config_value("LOG_PATH", "./data/agent_data")
-    if log_path.startswith("./data/"):
-        log_path = log_path[7:]  # Remove "./data/" prefix
-    position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
-
-    if not os.path.exists(position_file_path):
-        return 0
-
-    total_bought_today = 0
-    with open(position_file_path, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-                if record.get("date") == today_date:
-                    this_action = record.get("this_action", {})
-                    if this_action.get("action") == "buy" and this_action.get("symbol") == symbol:
-                        total_bought_today += this_action.get("amount", 0)
-            except Exception:
-                continue
-
-    return total_bought_today
-
-
 @mcp.tool()
 def sell(symbol: str, amount: int) -> Dict[str, Any]:
     """
-    Sell stock function
+    Sell U.S. stock function.
 
     This function simulates stock selling operations, including the following steps:
     1. Get current position and operation ID
     2. Get stock opening price for the day
-    3. Validate sell conditions (position exists, sufficient quantity, lot size, T+1 for CN market)
+    3. Validate sell conditions (position exists and sufficient quantity)
     4. Update position (decrease stock quantity, increase cash)
     5. Record transaction to position.jsonl file
 
     Args:
         symbol: Stock symbol, such as "AAPL", "MSFT", etc.
-        amount: Sell quantity, must be a positive integer, indicating how many shares to sell
-                For Chinese A-shares (symbols ending with .SH or .SZ), must be multiples of 100
-                and cannot sell shares bought on the same day (T+1 rule)
+        amount: Sell quantity, must be a positive integer share count
 
     Returns:
         Dict[str, Any]:
@@ -309,8 +253,6 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
     Example:
         >>> result = sell("AAPL", 10)
         >>> print(result)  # {"AAPL": 90, "MSFT": 5, "CASH": 15000.0, ...}
-        >>> result = sell("600519.SH", 100)  # Chinese A-shares must be multiples of 100
-        >>> print(result)  # {"600519.SH": 0, "CASH": 115000.0, ...}
     """
     # Step 1: Get environment variables and basic information
     # Get signature (model name) from environment variable, used to determine data storage path
@@ -321,11 +263,7 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
     # Get current trading date from environment variable
     today_date = get_config_value("TODAY_DATE")
 
-    # Auto-detect market type based on symbol format
-    if symbol.endswith((".SH", ".SZ")):
-        market = "cn"
-    else:
-        market = "us"
+    market = "us"
 
     # Amount validation for stocks
     try:
@@ -343,16 +281,6 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
             "symbol": symbol,
             "amount": amount,
             "date": today_date,
-        }
-
-    # 🇨🇳 Chinese A-shares trading rule: Must trade in lots of 100 shares (一手 = 100股)
-    if market == "cn" and amount % 100 != 0:
-        return {
-            "error": f"Chinese A-shares must be traded in multiples of 100 shares (1 lot = 100 shares). You tried to sell {amount} shares.",
-            "symbol": symbol,
-            "amount": amount,
-            "date": today_date,
-            "suggestion": f"Please use {(amount // 100) * 100} or {((amount // 100) + 1) * 100} shares instead.",
         }
 
     # Acquire lock for atomic read-validate-modify-write on positions
@@ -386,22 +314,6 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
                 "symbol": symbol,
                 "date": today_date,
             }
-
-        # Chinese A-shares T+1 trading rule
-        if market == "cn":
-            bought_today = _get_today_buy_amount(symbol, today_date, signature)
-            if bought_today > 0:
-                sellable_amount = current_position[symbol] - bought_today
-                if amount > sellable_amount:
-                    return {
-                        "error": f"T+1 restriction violated! You bought {bought_today} shares of {symbol} today and cannot sell them until tomorrow.",
-                        "symbol": symbol,
-                        "total_position": current_position[symbol],
-                        "bought_today": bought_today,
-                        "sellable_today": max(0, sellable_amount),
-                        "want_to_sell": amount,
-                        "date": today_date,
-                    }
 
         # Step 5: Execute sell operation, update position
         new_position = current_position.copy()

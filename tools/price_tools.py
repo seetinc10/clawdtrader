@@ -46,27 +46,14 @@ def _parse_timestamp_to_dt(ts: str) -> datetime:
 
 def get_market_type() -> str:
     """
-    智能获取市场类型，支持多种检测方式：
-    1. 优先从配置中读取 MARKET
-    2. 如果未设置，则根据 LOG_PATH 推断（agent_data_astock -> cn, agent_data_crypto -> crypto, agent_data -> us）
-    3. 最后默认为 us
+    Return the active market type for the current repo.
 
-    Returns:
-        "cn" for A-shares market, "us" for US market, "crypto" for cryptocurrency market
+    The workspace is now U.S.-stock only, so this helper always resolves to
+    "us" unless a compatible override is already set in config.
     """
-    # 方式1: 从配置读取
     market = get_config_value("MARKET", None)
-    if market in ["cn", "us", "crypto"]:
+    if market == "us":
         return market
-
-    # 方式2: 根据 LOG_PATH 推断
-    log_path = get_config_value("LOG_PATH", "./data/agent_data")
-    if "astock" in log_path.lower() or "a_stock" in log_path.lower():
-        return "cn"
-    elif "crypto" in log_path.lower():
-        return "crypto"
-
-    # 方式3: 默认为美股
     return "us"
 
 
@@ -174,93 +161,29 @@ all_nasdaq_100_symbols = [
     "GFS",
 ]
 
-all_sse_50_symbols = [
-    "600519.SH",
-    "601318.SH",
-    "600036.SH",
-    "601899.SH",
-    "600900.SH",
-    "601166.SH",
-    "600276.SH",
-    "600030.SH",
-    "603259.SH",
-    "688981.SH",
-    "688256.SH",
-    "601398.SH",
-    "688041.SH",
-    "601211.SH",
-    "601288.SH",
-    "601328.SH",
-    "688008.SH",
-    "600887.SH",
-    "600150.SH",
-    "601816.SH",
-    "601127.SH",
-    "600031.SH",
-    "688012.SH",
-    "603501.SH",
-    "601088.SH",
-    "600309.SH",
-    "601601.SH",
-    "601668.SH",
-    "603993.SH",
-    "601012.SH",
-    "601728.SH",
-    "600690.SH",
-    "600809.SH",
-    "600941.SH",
-    "600406.SH",
-    "601857.SH",
-    "601766.SH",
-    "601919.SH",
-    "600050.SH",
-    "600760.SH",
-    "601225.SH",
-    "600028.SH",
-    "601988.SH",
-    "688111.SH",
-    "601985.SH",
-    "601888.SH",
-    "601628.SH",
-    "601600.SH",
-    "601658.SH",
-    "600048.SH",
-]
-
-
 def get_merged_file_path(market: str = "us") -> Path:
     """Get merged.jsonl path based on market type.
 
     Args:
-        market: Market type, "us" for US stocks, "cn" for A-shares, "crypto" for cryptocurrencies
+        market: Market type. Kept for compatibility; the repo uses U.S. data.
 
     Returns:
         Path object pointing to the merged.jsonl file
     """
     base_dir = Path(__file__).resolve().parents[1]
-    if market == "cn":
-        return base_dir / "data" / "A_stock" / "merged.jsonl"
-    elif market == "crypto":
-        return base_dir / "data" / "crypto" / "crypto_merged.jsonl"
-    else:
-        return base_dir / "data" / "merged.jsonl"
+    return base_dir / "data" / "merged.jsonl"
 
 def _resolve_merged_file_path_for_date(
     today_date: Optional[str], market: str, merged_path: Optional[str] = None
 ) -> Path:
     """
-    Resolve the correct merged data file path taking into account market and granularity.
-    For A-shares:
-      - Daily: data/A_stock/merged.jsonl
-      - Hourly (timestamp contains space): data/A_stock/merged_hourly.jsonl
-    A custom merged_path, if provided, takes precedence.
+    Resolve the merged data file path for the active U.S. dataset.
     """
     if merged_path is not None:
         return Path(merged_path)
-    base_dir = Path(__file__).resolve().parents[1]
-    if market == "cn" and today_date and " " in today_date:
-        # Hourly trading session for A-shares
-        return base_dir / "data" / "A_stock" / "merged_hourly.jsonl"
+    configured_merged_path = get_config_value("MERGED_PATH", None)
+    if configured_merged_path:
+        return Path(configured_merged_path)
     return get_merged_file_path(market)
 
 
@@ -269,37 +192,11 @@ def is_trading_day(date: str, market: str = "us") -> bool:
 
     Args:
         date: Date string in "YYYY-MM-DD" format
-        market: Market type ("us", "cn", or "crypto")
+        market: Market type. The current repo uses "us".
 
     Returns:
         True if the date exists in merged.jsonl (is a trading day), False otherwise
     """
-    # MVP assumption: crypto trades every day, but the date should not be neither in the future nor no any data yet.
-    # if market == "crypto":
-    #     # Parse input date/time and compare real-world time (to the minute).
-    #     # If input has no time part, default to 00:00. Supported formats:
-    #     #   "YYYY-MM-DD", "YYYY-MM-DD HH:MM", "YYYY-MM-DD HH:MM:SS"
-    #     fmt_candidates = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]
-    #     input_dt = None
-    #     for fmt in fmt_candidates:
-    #         try:
-    #             input_dt = datetime.strptime(date, fmt)
-    #             break
-    #         except Exception:
-    #             continue
-    #     if input_dt is None:
-    #         # Unable to parse input date -> treat as not a trading day
-    #         return False
-
-    #     # Normalize to minute precision (ignore seconds/microseconds)
-    #     input_dt = input_dt.replace(second=0, microsecond=0)
-    #     now_minute = datetime.now().replace(second=0, microsecond=0)
-
-    #     # If current real-world time is earlier than the requested time, it's future -> return False
-    #     if now_minute < input_dt:
-    #         return False
-    #     return True
-
     merged_file_path = get_merged_file_path(market)
 
     if not merged_file_path.exists():
@@ -337,7 +234,7 @@ def get_all_trading_days(market: str = "us") -> List[str]:
     """Get all available trading days from merged.jsonl.
 
     Args:
-        market: Market type ("us" or "cn")
+        market: Market type. The current repo uses "us".
 
     Returns:
         Sorted list of trading dates in "YYYY-MM-DD" format
@@ -369,10 +266,10 @@ def get_stock_name_mapping(market: str = "us") -> Dict[str, str]:
     """Get mapping from stock symbols to names.
 
     Args:
-        market: Market type ("us" or "cn")
+        market: Market type. The current repo uses "us".
 
     Returns:
-        Dictionary mapping symbols to names, e.g. {"600519.SH": "贵州茅台"}
+        Dictionary mapping symbols to names.
     """
     merged_file_path = get_merged_file_path(market)
 
@@ -404,34 +301,13 @@ def format_price_dict_with_names(
     """Format price dictionary to include stock names for display.
 
     Args:
-        price_dict: Original price dictionary with keys like "600519.SH_price"
-        market: Market type ("us" or "cn")
+        price_dict: Original price dictionary with keys like "AAPL_price"
+        market: Market type. Kept for compatibility.
 
     Returns:
-        New dictionary with keys like "600519.SH (贵州茅台)_price" for CN market,
-        unchanged for US market
+        The input dictionary, unchanged.
     """
-    if market != "cn":
-        return price_dict
-
-    name_map = get_stock_name_mapping(market)
-    if not name_map:
-        return price_dict
-
-    formatted_dict = {}
-    for key, value in price_dict.items():
-        if key.endswith("_price"):
-            symbol = key[:-6]  # Remove "_price" suffix
-            stock_name = name_map.get(symbol, "")
-            if stock_name:
-                new_key = f"{symbol} ({stock_name})_price"
-            else:
-                new_key = key
-            formatted_dict[new_key] = value
-        else:
-            formatted_dict[key] = value
-
-    return formatted_dict
+    return price_dict
 
 
 def get_yesterday_date(today_date: str, merged_path: Optional[str] = None, market: str = "us") -> str:

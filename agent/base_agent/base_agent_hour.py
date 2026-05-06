@@ -21,7 +21,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 sys.path.insert(0, project_root)
 
 from tools.general_tools import extract_conversation, extract_tool_messages, get_config_value, write_config_value
-from tools.price_tools import add_no_trade_record
+from tools.price_tools import _resolve_merged_file_path_for_date, add_no_trade_record
 from prompts.agent_prompt import get_agent_system_prompt, STOP_SIGNAL
 
 # Load environment variables
@@ -57,7 +57,7 @@ class BaseAgent_Hour(BaseAgent):
         self.agent = create_agent(
             self.model,
             tools=self.tools,
-            system_prompt=get_agent_system_prompt(today_date, self.signature),
+            system_prompt=get_agent_system_prompt(today_date, self.signature, self.market, self.stock_symbols),
         )
         # If verbose, try to attach console callbacks to the agent itself
         if getattr(self, "verbose", False):
@@ -150,9 +150,9 @@ class BaseAgent_Hour(BaseAgent):
         else:
             raise ValueError("Only support hour-level trading. Please use YYYY-MM-DD HH:MM:SS format.")
         
-        # Get merged.jsonl path
-        base_dir = Path(__file__).resolve().parents[2]
-        merged_file = base_dir / "data" / "merged.jsonl"
+        # Respect runtime MERGED_PATH overrides so watchlist micro-backtests can
+        # replay temporary datasets without mutating the main repo data files.
+        merged_file = _resolve_merged_file_path_for_date(init_date, self.market)
         
         if not merged_file.exists():
             return []

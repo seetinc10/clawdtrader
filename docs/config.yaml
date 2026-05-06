@@ -1,7 +1,5 @@
-# Clawdbot Trader Frontend Configuration
-# This file contains all agent configurations and display settings
+# Clawdbot Trader frontend configuration
 
-# Market configurations - Easy to extend for new markets (e.g., crypto)
 markets:
   us:
     name: "US Market (Nasdaq-100)"
@@ -11,11 +9,11 @@ markets:
     benchmark_name: "QQQ"
     benchmark_display_name: "QQQ Invesco"
     currency: "USD"
-    icon: "🇺🇸"
-    price_data_type: "individual"  # individual JSON files per stock
-    time_granularity: "hourly"  # hourly timestamps with hour component
+    icon: "US"
+    price_data_type: "individual"
+    time_granularity: "hourly"
     enabled: true
-    agents:  # US market specific agents
+    agents:
       - folder: "claude-3.7-sonnet"
         display_name: "Claude 3.7 Sonnet"
         icon: "./figs/claude-color.svg"
@@ -37,103 +35,11 @@ markets:
         color: "#10a37f"
         enabled: true
 
-  cn:
-    name: "A-Shares (SSE 50)"
-    subtitle: "Track how different AI models perform in SSE 50 A-share stock trading"
-    data_dir: "agent_data_astock"
-    benchmark_file: "A_stock/index_daily_sse_50.json"
-    benchmark_name: "SSE 50"
-    benchmark_display_name: "SSE 50 Index"
-    currency: "CNY"
-    icon: "🇨🇳"
-    price_data_type: "merged"  # merged.jsonl file
-    price_data_file: "A_stock/merged.jsonl"
-    time_granularity: "daily"  # daily dates without hour component
-    enabled: true
-    agents:  # CN market specific agents
-      - folder: "claude-3.7-sonnet"
-        display_name: "Claude 3.7 Sonnet"
-        icon: "./figs/claude-color.svg"
-        color: "#8338ec"
-        enabled: true
-      - folder: "deepseek-chat-v3.1"
-        display_name: "DeepSeek Chat v3.1"
-        icon: "./figs/deepseek.svg"
-        color: "#ff006e"
-        enabled: true
-      - folder: "gpt-4o"
-        display_name: "GPT-4o"
-        icon: "./figs/openai.svg"
-        color: "#10a37f"
-        enabled: true
-
-  cn_hour:
-    name: "A-Shares (Hourly)"
-    subtitle: "Track how different AI models perform in SSE 50 A-share stock trading (Hourly)"
-    data_dir: "agent_data_astock_hour"
-    benchmark_file: "A_stock/index_daily_sse_50.json"
-    benchmark_name: "SSE 50"
-    benchmark_display_name: "SSE 50 Index"
-    currency: "CNY"
-    icon: "🇨🇳"
-    price_data_type: "merged"  # merged.jsonl file
-    price_data_file: "A_stock/merged_hourly.jsonl"
-    time_granularity: "hourly"  # hourly timestamps
-    enabled: false # Hidden from main selector, toggled via JS
-    agents:  # CN market specific agents (hourly)
-      - folder: "claude-3.7-sonnet-astock-hour"
-        display_name: "Claude 3.7 Sonnet"
-        icon: "./figs/claude-color.svg"
-        color: "#8338ec"
-        enabled: true
-      - folder: "deepseek-chat-v3.1-astock-hour"
-        display_name: "DeepSeek Chat v3.1"
-        icon: "./figs/deepseek.svg"
-        color: "#ff006e"
-        enabled: true
-      - folder: "gpt-4o-astock-hour"
-        display_name: "GPT-4o"
-        icon: "./figs/openai.svg"
-        color: "#10a37f"
-        enabled: true
-
-  crypto:
-    name: "Crypto Market"
-    subtitle: "Track how different AI models perform in cryptocurrency trading"
-    data_dir: "agent_data_crypto"
-    benchmark_file: "crypto/CD5_crypto_index.json"
-    benchmark_name: "CD5"
-    benchmark_display_name: "CD5 Index"
-    currency: "USDT"
-    icon: "₿"
-    price_data_type: "merged"
-    price_data_file: "crypto/crypto_merged.jsonl"
-    time_granularity: "daily"
-    enabled: true
-    agents:
-      - folder: "claude-3.7-sonnet"
-        display_name: "Claude 3.7 Sonnet"
-        icon: "./figs/claude-color.svg"
-        color: "#8338ec"
-        enabled: true
-      - folder: "deepseek-chat-v3.1"
-        display_name: "DeepSeek Chat v3.1"
-        icon: "./figs/deepseek.svg"
-        color: "#ff006e"
-        enabled: true
-      - folder: "gpt-4o"
-        display_name: "GPT-4o"
-        icon: "./figs/openai.svg"
-        color: "#10a37f"
-        enabled: true
-
-# Data paths configuration (legacy support - will use market-specific paths when available)
 data:
   base_path: "./data"
   price_file_prefix: "daily_prices_"
   benchmark_file: "Adaily_prices_QQQ.json"
 
-# Benchmark configuration
 benchmark:
   folder: "QQQ"
   display_name: "QQQ Invesco"
@@ -141,25 +47,22 @@ benchmark:
   color: "#ff6b00"
   enabled: true
 
-# Chart display settings
 chart:
-  default_scale: "linear"  # or "logarithmic"
+  default_scale: "linear"
   max_ticks: 15
   point_radius: 0
   point_hover_radius: 7
   border_width: 3
   tension: 0.42
 
-# UI settings
 ui:
-  initial_value: 10000  # Starting cash for all agents
-  max_recent_trades: 20  # Number of trades to show in portfolio view
+  initial_value: 10000
+  max_recent_trades: 20
   date_formats:
     hourly: "MM/DD HH:mm"
     daily: "YYYY-MM-DD"
 
-# Cache settings
 cache:
-  enabled: true  # Enable caching for faster page loads
-  max_age_days: 7  # Maximum age of localStorage cache in days
-  show_performance_metrics: true  # Show load time comparison in console
+  enabled: true
+  max_age_days: 7
+  show_performance_metrics: true

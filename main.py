@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import os
 import sys
@@ -28,18 +28,6 @@ AGENT_REGISTRY = {
     "BaseAgent_Hour": {
         "module": "agent.base_agent.base_agent_hour",
         "class": "BaseAgent_Hour"
-    },
-    "BaseAgentAStock": {
-        "module": "agent.base_agent_astock.base_agent_astock",
-        "class": "BaseAgentAStock"
-    },
-    "BaseAgentAStock_Hour": {
-        "module": "agent.base_agent_astock.base_agent_astock_hour",
-        "class": "BaseAgentAStock_Hour"
-    },
-    "BaseAgentCrypto": {
-        "module": "agent.base_agent_crypto.base_agent_crypto",
-        "class": "BaseAgentCrypto"
     }
 }
 
@@ -60,7 +48,7 @@ def get_agent_class(agent_type):
     """
     if agent_type not in AGENT_REGISTRY:
         supported_types = ", ".join(AGENT_REGISTRY.keys())
-        raise ValueError(f"❌ Unsupported agent type: {agent_type}\n" f"   Supported types: {supported_types}")
+        raise ValueError(f"âŒ Unsupported agent type: {agent_type}\n" f"   Supported types: {supported_types}")
 
     agent_info = AGENT_REGISTRY[agent_type]
     module_path = agent_info["module"]
@@ -72,12 +60,12 @@ def get_agent_class(agent_type):
 
         module = importlib.import_module(module_path)
         agent_class = getattr(module, class_name)
-        print(f"✅ Successfully loaded Agent class: {agent_type} (from {module_path})")
+        print(f"âœ… Successfully loaded Agent class: {agent_type} (from {module_path})")
         return agent_class
     except ImportError as e:
-        raise ImportError(f"❌ Unable to import agent module {module_path}: {e}")
+        raise ImportError(f"âŒ Unable to import agent module {module_path}: {e}")
     except AttributeError as e:
-        raise AttributeError(f"❌ Class {class_name} not found in module {module_path}: {e}")
+        raise AttributeError(f"âŒ Class {class_name} not found in module {module_path}: {e}")
 
 
 def load_config(config_path=None):
@@ -97,19 +85,19 @@ def load_config(config_path=None):
         config_path = Path(config_path)
 
     if not config_path.exists():
-        print(f"❌ Configuration file does not exist: {config_path}")
+        print(f"âŒ Configuration file does not exist: {config_path}")
         exit(1)
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
-        print(f"✅ Successfully loaded configuration file: {config_path}")
+        print(f"âœ… Successfully loaded configuration file: {config_path}")
         return config
     except json.JSONDecodeError as e:
-        print(f"❌ Configuration file JSON format error: {e}")
+        print(f"âŒ Configuration file JSON format error: {e}")
         exit(1)
     except Exception as e:
-        print(f"❌ Failed to load configuration file: {e}")
+        print(f"âŒ Failed to load configuration file: {e}")
         exit(1)
 
 
@@ -131,19 +119,8 @@ async def main(config_path=None):
         exit(1)
 
     # Get market type from configuration
-    market = config.get("market", "us")
-    # Auto-detect market from agent_type (BaseAgentAStock always uses CN market)
-    if agent_type == "BaseAgentAStock" or agent_type == "BaseAgentAStock_Hour":
-        market = "cn"
-    elif agent_type == "BaseAgentCrypto":
-        market = "crypto"
-
-    if market == "crypto":
-        print(f"🌍 Market type: Cryptocurrency (24/7 trading)")
-    elif market == "cn":
-        print(f"🌍 Market type: A-shares (China)")
-    else:
-        print(f"🌍 Market type: US stocks")
+    market = "us"
+    print("Market type: US stocks")
 
     # Get date range from configuration file
     INIT_DATE = config["date_range"]["init_date"]
@@ -152,10 +129,10 @@ async def main(config_path=None):
     # Environment variables can override dates in configuration file
     if os.getenv("INIT_DATE"):
         INIT_DATE = os.getenv("INIT_DATE")
-        print(f"⚠️  Using environment variable to override INIT_DATE: {INIT_DATE}")
+        print(f"âš ï¸  Using environment variable to override INIT_DATE: {INIT_DATE}")
     if os.getenv("END_DATE"):
         END_DATE = os.getenv("END_DATE")
-        print(f"⚠️  Using environment variable to override END_DATE: {END_DATE}")
+        print(f"âš ï¸  Using environment variable to override END_DATE: {END_DATE}")
 
     # Validate date range
     # Support both YYYY-MM-DD and YYYY-MM-DD HH:MM:SS formats
@@ -170,7 +147,7 @@ async def main(config_path=None):
         END_DATE_obj = datetime.strptime(END_DATE, "%Y-%m-%d")
     
     if INIT_DATE_obj > END_DATE_obj:
-        print("❌ INIT_DATE is greater than END_DATE")
+        print("âŒ INIT_DATE is greater than END_DATE")
         exit(1)
 
     # Get model list from configuration file (only select enabled models)
@@ -190,12 +167,12 @@ async def main(config_path=None):
     # Display enabled model information
     model_names = [m.get("name", m.get("signature")) for m in enabled_models]
 
-    print("🚀 Starting trading experiment")
-    print(f"🤖 Agent type: {agent_type}")
-    print(f"📅 Date range: {INIT_DATE} to {END_DATE}")
-    print(f"🤖 Model list: {model_names}")
+    print("ðŸš€ Starting trading experiment")
+    print(f"ðŸ¤– Agent type: {agent_type}")
+    print(f"ðŸ“… Date range: {INIT_DATE} to {END_DATE}")
+    print(f"ðŸ¤– Model list: {model_names}")
     print(
-        f"⚙️  Agent config: max_steps={max_steps}, max_retries={max_retries}, base_delay={base_delay}, initial_cash={initial_cash}, verbose={verbose}, sentiment_mode={sentiment_mode}"
+        f"âš™ï¸  Agent config: max_steps={max_steps}, max_retries={max_retries}, base_delay={base_delay}, initial_cash={initial_cash}, verbose={verbose}, sentiment_mode={sentiment_mode}"
     )
 
     for model_config in enabled_models:
@@ -208,16 +185,16 @@ async def main(config_path=None):
         
         # Validate required fields
         if not basemodel:
-            print(f"❌ Model {model_name} missing basemodel field")
+            print(f"âŒ Model {model_name} missing basemodel field")
             continue
         if not signature:
-            print(f"❌ Model {model_name} missing signature field")
+            print(f"âŒ Model {model_name} missing signature field")
             continue
 
         print("=" * 60)
-        print(f"🤖 Processing model: {model_name}")
-        print(f"📝 Signature: {signature}")
-        print(f"🔧 BaseModel: {basemodel}")
+        print(f"ðŸ¤– Processing model: {model_name}")
+        print(f"ðŸ“ Signature: {signature}")
+        print(f"ðŸ”§ BaseModel: {basemodel}")
             
         # Initialize runtime configuration
         # Use the shared config file from RUNTIME_ENV_PATH in .env
@@ -237,7 +214,7 @@ async def main(config_path=None):
             runtime_env_path = _resolve_runtime_env_path()
             if os.path.exists(runtime_env_path):
                 os.remove(runtime_env_path)
-                print(f"🔄 Position file not found, cleared config for fresh start from {INIT_DATE}")
+                print(f"ðŸ”„ Position file not found, cleared config for fresh start from {INIT_DATE}")
         
         # Write config values to shared config file (from .env RUNTIME_ENV_PATH)
         write_config_value("SIGNATURE", signature)
@@ -245,98 +222,54 @@ async def main(config_path=None):
         write_config_value("MARKET", market)
         write_config_value("LOG_PATH", log_path)
         
-        print(f"✅ Runtime config initialized: SIGNATURE={signature}, MARKET={market}")
+        print(f"âœ… Runtime config initialized: SIGNATURE={signature}, MARKET={market}")
 
-        # Select symbols based on agent type and market
-        # Crypto agents don't use stock_symbols parameter
-        if agent_type == "BaseAgentCrypto":
-            stock_symbols = None  # Crypto agent uses its own crypto_symbols
-        elif agent_type == "BaseAgentAStock" or agent_type == "BaseAgentAStock_Hour":
-            stock_symbols = None  # Let BaseAgentAStock use its default SSE 50
-        elif market == "cn":
-            from prompts.agent_prompt import all_sse_50_symbols
-
-            stock_symbols = all_sse_50_symbols
-        else:
-            stock_symbols = all_nasdaq_100_symbols
+        stock_symbols = all_nasdaq_100_symbols
 
         try:
-            # Dynamically create Agent instance
-            # Crypto agents have different parameter requirements
-            if agent_type == "BaseAgentCrypto":
-                agent = AgentClass(
-                    signature=signature,
-                    basemodel=basemodel,
-                    log_path=log_path,
-                    max_steps=max_steps,
-                    max_retries=max_retries,
-                    base_delay=base_delay,
-                    initial_cash=initial_cash,
-                    init_date=INIT_DATE,
-                    openai_base_url=openai_base_url,
-                    openai_api_key=openai_api_key,
-                    sentiment_mode=sentiment_mode,
-                    fixed_temperature=fixed_temperature,
-                )
-            else:
-                agent = AgentClass(
-                    signature=signature,
-                    basemodel=basemodel,
-                    stock_symbols=stock_symbols,
-                    log_path=log_path,
-                    max_steps=max_steps,
-                    max_retries=max_retries,
-                    base_delay=base_delay,
-                    initial_cash=initial_cash,
-                    init_date=INIT_DATE,
-                    openai_base_url=openai_base_url,
-                    openai_api_key=openai_api_key,
-                    sentiment_mode=sentiment_mode,
-                    fixed_temperature=fixed_temperature,
-                )
+            agent = AgentClass(
+                signature=signature,
+                basemodel=basemodel,
+                stock_symbols=stock_symbols,
+                log_path=log_path,
+                max_steps=max_steps,
+                max_retries=max_retries,
+                base_delay=base_delay,
+                initial_cash=initial_cash,
+                init_date=INIT_DATE,
+                openai_base_url=openai_base_url,
+                openai_api_key=openai_api_key,
+                sentiment_mode=sentiment_mode,
+                fixed_temperature=fixed_temperature,
+            )
 
-            print(f"✅ {agent_type} instance created successfully: {agent}")
+            print(f"âœ… {agent_type} instance created successfully: {agent}")
 
             # Initialize MCP connection and AI model
             await agent.initialize()
-            print("✅ Initialization successful")
+            print("âœ… Initialization successful")
             # Run all trading days in date range
             await agent.run_date_range(INIT_DATE, END_DATE)
 
             # Display final position summary
             summary = agent.get_position_summary()
-            # Get currency symbol from agent's actual market (more accurate)
-            if agent.market == "crypto":
-                currency_symbol = "USDT"
-            elif agent.market == "cn":
-                currency_symbol = "¥"
-            else:
-                currency_symbol = "$"
-            print(f"📊 Final position summary:")
+            print(f"ðŸ“Š Final position summary:")
             print(f"   - Latest date: {summary.get('latest_date')}")
             print(f"   - Total records: {summary.get('total_records')}")
-            print(f"   - Cash balance: {currency_symbol}{summary.get('positions', {}).get('CASH', 0):,.2f}")
-
-            # Show crypto positions if this is a crypto agent
-            if agent.market == "crypto" and hasattr(agent, 'crypto_symbols'):
-                crypto_positions = {k: v for k, v in summary.get('positions', {}).items() if k.endswith('-USDT') and v > 0}
-                if crypto_positions:
-                    print(f"   - Crypto positions:")
-                    for symbol, amount in crypto_positions.items():
-                        print(f"     • {symbol}: {amount}")
+            print(f"   - Cash balance: ${summary.get('positions', {}).get('CASH', 0):,.2f}")
 
         except Exception as e:
-            print(f"❌ Error processing model {model_name} ({signature}): {str(e)}")
-            print(f"📋 Error details: {e}")
+            print(f"âŒ Error processing model {model_name} ({signature}): {str(e)}")
+            print(f"ðŸ“‹ Error details: {e}")
             # Can choose to continue processing next model, or exit
             # continue  # Continue processing next model
             exit()  # Or exit program
 
         print("=" * 60)
-        print(f"✅ Model {model_name} ({signature}) processing completed")
+        print(f"âœ… Model {model_name} ({signature}) processing completed")
         print("=" * 60)
 
-    print("🎉 All models processing completed!")
+    print("ðŸŽ‰ All models processing completed!")
 
 
 if __name__ == "__main__":
@@ -348,8 +281,8 @@ if __name__ == "__main__":
     config_path = sys.argv[1] if len(sys.argv) > 1 else None
 
     if config_path:
-        print(f"📄 Using specified configuration file: {config_path}")
+        print(f"ðŸ“„ Using specified configuration file: {config_path}")
     else:
-        print(f"📄 Using default configuration file: configs/default_config.json")
+        print(f"ðŸ“„ Using default configuration file: configs/default_config.json")
 
     asyncio.run(main(config_path))

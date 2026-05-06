@@ -28,15 +28,22 @@ from openai import OpenAI
 # Import memory tools
 try:
     from tools.memory_tools import (
-        format_insights_for_prompt,
-        get_memory_context_for_prompt,
-        save_strategy_insight
+        get_memory_stats
     )
     from tools.performance_tracker import PerformanceTracker
     MEMORY_ENABLED = True
 except ImportError:
     MEMORY_ENABLED = False
     print("Warning: Memory tools not available. Running without memory.")
+
+from tools.live_trading_utils import (
+    build_trading_prompt,
+    enforce_position_limit,
+    fetch_current_prices,
+    get_memory_section,
+    get_portfolio_status,
+    request_ai_decision,
+)
 
 # Configuration
 SYMBOLS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]  # Stocks to trade
@@ -69,6 +76,10 @@ class LiveTrader:
         else:
             self.tracker = None
 
+    def log(self, message, tag='info'):
+        """Simple logger used by shared trading helpers."""
+        print(message)
+
     def get_account(self):
         """Get account info"""
         return self.api.get_account()
@@ -79,21 +90,7 @@ class LiveTrader:
 
     def get_current_prices(self, symbols):
         """Get current prices for symbols"""
-        prices = {}
-        try:
-            bars = self.api.get_latest_bars(symbols)
-            for symbol in symbols:
-                if symbol in bars:
-                    prices[symbol] = {
-                        'price': float(bars[symbol].c),
-                        'open': float(bars[symbol].o),
-                        'high': float(bars[symbol].h),
-                        'low': float(bars[symbol].l),
-                        'volume': int(bars[symbol].v)
-                    }
-        except Exception as e:
-            print(f"Error getting prices: {e}")
-        return prices
+        return fetch_current_prices(self.api, symbols, log_fn=self.log)
 
     def get_market_status(self):
         """Check if market is open"""
@@ -102,93 +99,44 @@ class LiveTrader:
 
     def format_portfolio_status(self):
         """Format current portfolio for AI"""
-        account = self.get_account()
-        positions = self.get_positions()
-
-        status = f"""
-ACCOUNT STATUS:
-- Cash: ${float(account.cash):,.2f}
-- Portfolio Value: ${float(account.portfolio_value):,.2f}
-- Buying Power: ${float(account.buying_power):,.2f}
-
-CURRENT POSITIONS:
-"""
-        if positions:
-            for pos in positions:
-                pnl = float(pos.unrealized_pl)
-                pnl_pct = float(pos.unrealized_plpc) * 100
-                status += f"- {pos.symbol}: {pos.qty} shares @ ${float(pos.avg_entry_price):.2f} (P/L: ${pnl:,.2f} / {pnl_pct:.1f}%)\n"
-        else:
-            status += "- No positions\n"
-
-        return status, float(account.cash), float(account.buying_power)
+        return get_portfolio_status(self.api)
 
     def get_ai_decision(self, prices, portfolio_status, cash, buying_power):
         """Get trading decision from AI with memory context"""
-
-        price_info = "CURRENT MARKET PRICES:\n"
-        for symbol, data in prices.items():
-            change = ((data['price'] - data['open']) / data['open']) * 100
-            price_info += f"- {symbol}: ${data['price']:.2f} (Today: {change:+.2f}%)\n"
-
-        # Get memory context if available
-        memory_section = ""
-        if MEMORY_ENABLED:
-            try:
-                memory_context = get_memory_context_for_prompt()
-                if memory_context and "No previous strategy insights" not in memory_context:
-                    memory_section = f"""
-STRATEGY MEMORY (Apply these learnings!):
-{memory_context}
-"""
-            except Exception as e:
-                print(f"  Warning: Could not load memory: {e}")
-
-        prompt = f"""You are Clawdbot, an AI stock trader with memory of past strategies and learnings.
-{memory_section}
-{portfolio_status}
-
-{price_info}
-
-Available cash: ${cash:,.2f}
-Buying power: ${buying_power:,.2f}
-
-RULES:
-1. You can only trade these stocks: {', '.join(SYMBOLS)}
-2. Maximum position size: {MAX_POSITION_SIZE*100}% of portfolio per stock
-3. Consider risk management - don't go all-in
-4. You can BUY, SELL, or HOLD
-5. IMPORTANT: Apply any relevant strategy insights from your memory!
-
-Respond with EXACTLY ONE JSON object (no other text):
-{{"action": "BUY" or "SELL" or "HOLD", "symbol": "TICKER", "quantity": NUMBER, "reason": "brief reason"}}
-
-Examples:
-{{"action": "BUY", "symbol": "AAPL", "quantity": 5, "reason": "Strong momentum, diversifying portfolio"}}
-{{"action": "SELL", "symbol": "TSLA", "quantity": 3, "reason": "Taking profits after 10% gain"}}
-{{"action": "HOLD", "symbol": "", "quantity": 0, "reason": "Market uncertain, preserving capital"}}
-"""
+        memory_section = get_memory_section(symbols=SYMBOLS if MEMORY_ENABLED else None, log_fn=self.log)
+        prompt = build_trading_prompt(
+            symbols=SYMBOLS,
+            prices=prices,
+            portfolio_status=portfolio_status,
+            cash=cash,
+            buying_power=buying_power,
+            max_position_size=MAX_POSITION_SIZE,
+            memory_section=memory_section,
+            intro="You are Clawdbot, an AI stock trader with memory of past strategies and learnings.",
+            rules=[
+                f"You can only trade these stocks: {', '.join(SYMBOLS)}",
+                f"Maximum position size: {MAX_POSITION_SIZE*100}% of portfolio per stock",
+                "Consider risk management - don't go all-in",
+                "You can BUY, SELL, or HOLD",
+                "IMPORTANT: Apply any relevant strategy insights from your memory!",
+            ],
+            examples=[
+                '{"action": "BUY", "symbol": "AAPL", "quantity": 5, "reason": "Strong momentum, diversifying portfolio"}',
+                '{"action": "SELL", "symbol": "TSLA", "quantity": 3, "reason": "Taking profits after 10% gain"}',
+                '{"action": "HOLD", "symbol": "", "quantity": 0, "reason": "Market uncertain, preserving capital"}',
+            ],
+        )
 
         try:
-            response = self.openai.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "You are a professional stock trader. Always respond with valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ],
+            return request_ai_decision(
+                self.openai,
+                self.model,
+                prompt,
                 temperature=0.3,
-                max_tokens=200
+                log_fn=self.log,
             )
-
-            content = response.choices[0].message.content.strip()
-            # Extract JSON from response
-            if '{' in content and '}' in content:
-                json_str = content[content.find('{'):content.rfind('}')+1]
-                return json.loads(json_str)
-            return {"action": "HOLD", "symbol": "", "quantity": 0, "reason": "Could not parse response"}
-
         except Exception as e:
-            print(f"AI Error: {e}")
+            self.log(f"AI Error: {e}", 'error')
             return {"action": "HOLD", "symbol": "", "quantity": 0, "reason": f"Error: {e}"}
 
     def execute_trade(self, decision, prices):
@@ -199,32 +147,21 @@ Examples:
         reason = decision.get('reason', '')
 
         if action == 'HOLD' or quantity <= 0:
-            print(f"  Decision: HOLD - {reason}")
+            self.log(f"  Decision: HOLD - {reason}")
             return None
 
         # Position size enforcement for buys
-        if action == 'BUY' and symbol in prices:
-            try:
-                account = self.get_account()
-                portfolio_value = float(account.portfolio_value)
-                if portfolio_value > 0:
-                    # Current position value for this symbol
-                    current_value = 0
-                    for pos in self.get_positions():
-                        if pos.symbol == symbol:
-                            current_value = float(pos.market_value)
-                            break
-                    proposed_value = current_value + quantity * prices[symbol]['price']
-                    position_pct = proposed_value / portfolio_value
-                    if position_pct > MAX_POSITION_SIZE:
-                        max_qty = int((MAX_POSITION_SIZE * portfolio_value - current_value) / prices[symbol]['price'])
-                        if max_qty <= 0:
-                            print(f"  REJECTED: {symbol} already at max position size ({position_pct*100:.1f}% > {MAX_POSITION_SIZE*100}%)")
-                            return None
-                        print(f"  WARNING: Reducing {symbol} quantity from {quantity} to {max_qty} to stay under {MAX_POSITION_SIZE*100}% limit")
-                        quantity = max_qty
-            except Exception as e:
-                print(f"  Warning: Could not check position size: {e}")
+        quantity = enforce_position_limit(
+            self.api,
+            action=action,
+            symbol=symbol,
+            quantity=quantity,
+            prices=prices,
+            max_position_size=MAX_POSITION_SIZE,
+            log_fn=self.log,
+        )
+        if quantity is None:
+            return None
 
         try:
             if action == 'BUY':
@@ -235,7 +172,7 @@ Examples:
                     type='market',
                     time_in_force='day'
                 )
-                print(f"  BUY ORDER: {quantity} {symbol} - {reason}")
+                self.log(f"  BUY ORDER: {quantity} {symbol} - {reason}")
 
                 # Track for memory/learning
                 if self.tracker and symbol in prices:
@@ -246,7 +183,7 @@ Examples:
                         price=prices[symbol]['price'],
                         reasoning=reason
                     )
-                    print(f"  [Memory] Tracking buy for future analysis")
+                    self.log("  [Memory] Tracking buy for future analysis")
 
                 return order
 
@@ -258,7 +195,7 @@ Examples:
                     type='market',
                     time_in_force='day'
                 )
-                print(f"  SELL ORDER: {quantity} {symbol} - {reason}")
+                self.log(f"  SELL ORDER: {quantity} {symbol} - {reason}")
 
                 # Track for memory/learning
                 if self.tracker and symbol in prices:
@@ -269,12 +206,12 @@ Examples:
                         price=prices[symbol]['price'],
                         reasoning=reason
                     )
-                    print(f"  [Memory] Trade outcome recorded")
+                    self.log("  [Memory] Trade outcome recorded")
 
                 return order
 
         except Exception as e:
-            print(f"  Trade Error: {e}")
+            self.log(f"  Trade Error: {e}", 'error')
             return None
 
     def run(self):
@@ -296,7 +233,6 @@ Examples:
         # Show memory status
         if MEMORY_ENABLED:
             try:
-                from tools.memory_tools import get_memory_stats
                 stats = get_memory_stats()
                 print(f"\nMemory Status:")
                 print(f"  Strategy insights: {stats['strategy_insights']}")

@@ -16,6 +16,7 @@ Data sources tried in order:
 import json
 import math
 import os
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -32,6 +33,7 @@ except ImportError:
 # Cache file to avoid hammering APIs on every trading step
 _CACHE_DIR = Path(__file__).resolve().parents[1] / "data" / "sentiment"
 _CACHE_FILE = _CACHE_DIR / "temperature_cache.json"
+_YF_CACHE_DIR = _CACHE_DIR / "yfinance_cache"
 
 # Mag 7 tickers (for reference / individual fallback)
 MAG7_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"]
@@ -52,6 +54,46 @@ TEMP_MAX = 0.95  # Ceiling: never fully random
 
 def _ensure_cache_dir():
     _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _ensure_yfinance_cache_dir():
+    _YF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _configure_yfinance_cache():
+    """Use a project-local yfinance cache so we avoid corrupt global user caches."""
+    if not _HAS_YFINANCE:
+        return
+
+    try:
+        _ensure_yfinance_cache_dir()
+        if hasattr(yf, "set_tz_cache_location"):
+            yf.set_tz_cache_location(str(_YF_CACHE_DIR))
+    except Exception as e:
+        print(f"[SentimentTemp] Warning: Could not configure yfinance cache: {e}")
+
+
+def _is_corrupt_cache_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    return any(
+        text in msg for text in (
+            "database disk image is malformed",
+            "file is not a database",
+            "malformed database schema",
+        )
+    )
+
+
+def _reset_yfinance_cache() -> bool:
+    """Delete the local yfinance cache so the next request can rebuild it cleanly."""
+    try:
+        shutil.rmtree(_YF_CACHE_DIR, ignore_errors=True)
+        _ensure_yfinance_cache_dir()
+        _configure_yfinance_cache()
+        return True
+    except Exception as e:
+        print(f"[SentimentTemp] Warning: Could not reset yfinance cache: {e}")
+        return False
 
 
 def _load_cache() -> Dict[str, Any]:
@@ -80,65 +122,71 @@ def _fetch_via_yfinance(ticker: str, max_expirations: int = 4) -> Optional[Dict[
     if not _HAS_YFINANCE:
         return None
 
-    try:
-        tk = yf.Ticker(ticker)
-        expirations = tk.options  # list of date strings like ['2026-02-07', ...]
-        if not expirations:
-            return None
+    _configure_yfinance_cache()
 
-        total_put_oi = 0
-        total_call_oi = 0
-        total_put_volume = 0
-        total_call_volume = 0
-        dates_fetched = 0
+    for attempt in range(2):
+        try:
+            tk = yf.Ticker(ticker)
+            expirations = tk.options  # list of date strings like ['2026-02-07', ...]
+            if not expirations:
+                return None
 
-        for exp_date in expirations[:max_expirations]:
-            try:
-                chain = tk.option_chain(exp_date)
+            total_put_oi = 0
+            total_call_oi = 0
+            total_put_volume = 0
+            total_call_volume = 0
+            dates_fetched = 0
 
-                calls = chain.calls
-                puts = chain.puts
+            for exp_date in expirations[:max_expirations]:
+                try:
+                    chain = tk.option_chain(exp_date)
 
-                if calls is not None and len(calls) > 0:
-                    total_call_oi += int(calls["openInterest"].fillna(0).sum())
-                    total_call_volume += int(calls["volume"].fillna(0).sum())
+                    calls = chain.calls
+                    puts = chain.puts
 
-                if puts is not None and len(puts) > 0:
-                    total_put_oi += int(puts["openInterest"].fillna(0).sum())
-                    total_put_volume += int(puts["volume"].fillna(0).sum())
+                    if calls is not None and len(calls) > 0:
+                        total_call_oi += int(calls["openInterest"].fillna(0).sum())
+                        total_call_volume += int(calls["volume"].fillna(0).sum())
 
-                dates_fetched += 1
-            except Exception:
+                    if puts is not None and len(puts) > 0:
+                        total_put_oi += int(puts["openInterest"].fillna(0).sum())
+                        total_put_volume += int(puts["volume"].fillna(0).sum())
+
+                    dates_fetched += 1
+                except Exception:
+                    continue
+
+            if total_call_oi == 0 and total_call_volume == 0:
+                return None
+
+            # Prefer volume-based ratio (more current), fall back to OI
+            if total_call_volume > 0 and total_put_volume > 0:
+                pc_ratio = total_put_volume / total_call_volume
+                ratio_type = "volume"
+            elif total_call_oi > 0:
+                pc_ratio = total_put_oi / total_call_oi
+                ratio_type = "open_interest"
+            else:
+                return None
+
+            return {
+                "ticker": ticker,
+                "put_call_ratio": round(pc_ratio, 4),
+                "ratio_type": ratio_type,
+                "total_put_oi": total_put_oi,
+                "total_call_oi": total_call_oi,
+                "total_put_volume": total_put_volume,
+                "total_call_volume": total_call_volume,
+                "expirations_aggregated": dates_fetched,
+                "expiration_count": len(expirations),
+                "timestamp": datetime.now().isoformat(),
+            }
+        except Exception as e:
+            if attempt == 0 and _is_corrupt_cache_error(e) and _reset_yfinance_cache():
+                print(f"[SentimentTemp] yfinance cache was corrupted while fetching {ticker}; reset and retrying.")
                 continue
-
-        if total_call_oi == 0 and total_call_volume == 0:
+            print(f"[SentimentTemp] yfinance error for {ticker}: {e}")
             return None
-
-        # Prefer volume-based ratio (more current), fall back to OI
-        if total_call_volume > 0 and total_put_volume > 0:
-            pc_ratio = total_put_volume / total_call_volume
-            ratio_type = "volume"
-        elif total_call_oi > 0:
-            pc_ratio = total_put_oi / total_call_oi
-            ratio_type = "open_interest"
-        else:
-            return None
-
-        return {
-            "ticker": ticker,
-            "put_call_ratio": round(pc_ratio, 4),
-            "ratio_type": ratio_type,
-            "total_put_oi": total_put_oi,
-            "total_call_oi": total_call_oi,
-            "total_put_volume": total_put_volume,
-            "total_call_volume": total_call_volume,
-            "expirations_aggregated": dates_fetched,
-            "expiration_count": len(expirations),
-            "timestamp": datetime.now().isoformat(),
-        }
-    except Exception as e:
-        print(f"[SentimentTemp] yfinance error for {ticker}: {e}")
-        return None
 
 
 def _fetch_via_raw_api(ticker: str, max_expirations: int = 4) -> Optional[Dict[str, Any]]:
@@ -342,10 +390,48 @@ def pc_ratio_to_temperature(
     return round(temperature, 3)
 
 
+def fetch_vix() -> Optional[float]:
+    """Latest CBOE VIX close via yfinance. None on failure."""
+    if not _HAS_YFINANCE:
+        return None
+
+    _configure_yfinance_cache()
+
+    for attempt in range(2):
+        try:
+            df = yf.Ticker("^VIX").history(period="2d")
+            if df is None or df.empty:
+                return None
+            return float(df["Close"].iloc[-1])
+        except Exception as e:
+            if attempt == 0 and _is_corrupt_cache_error(e) and _reset_yfinance_cache():
+                print("[SentimentTemp] VIX cache was corrupted; reset local yfinance cache and retrying.")
+                continue
+            print(f"[SentimentTemp] VIX fetch failed: {e}")
+            return None
+
+
+def vix_to_temperature(vix: float, invert: bool = False) -> float:
+    """Map VIX → temperature in [0.1, 0.9].
+
+    Trend-following: low VIX → high temp (bullish), high VIX → low temp (fear).
+        VIX 12 → 0.90 (calm)
+        VIX 20 → 0.70
+        VIX 25 → 0.45
+        VIX 30 → 0.20 (panic)
+    """
+    raw = (30.0 - float(vix)) / 20.0 + 0.2
+    temp = max(0.1, min(0.9, raw))
+    if invert:
+        temp = 1.0 - temp
+    return round(temp, 3)
+
+
 def get_sentiment_temperature(
     use_contrarian: bool = False,
     cache_ttl_minutes: int = 60,
     force_refresh: bool = False,
+    vix_weight: float = 0.3,
 ) -> Dict[str, Any]:
     """
     Main entry point: Get the current sentiment-based temperature.
@@ -416,9 +502,18 @@ def get_sentiment_temperature(
         }
 
     pc_ratio = pc_data["put_call_ratio"]
-    temperature = pc_ratio_to_temperature(pc_ratio, invert=use_contrarian)
+    pc_temp = pc_ratio_to_temperature(pc_ratio, invert=use_contrarian)
 
-    # Classify sentiment
+    # Blend in VIX (broad-market fear gauge)
+    vix = fetch_vix()
+    if vix is not None and 0.0 < vix_weight <= 1.0:
+        vix_temp = vix_to_temperature(vix, invert=use_contrarian)
+        temperature = round((1.0 - vix_weight) * pc_temp + vix_weight * vix_temp, 3)
+    else:
+        vix_temp = None
+        temperature = pc_temp
+
+    # Classify sentiment using PC ratio (the more granular signal)
     if pc_ratio >= 1.1:
         sentiment = "EXTREME_FEAR"
     elif pc_ratio >= 0.85:
@@ -430,8 +525,19 @@ def get_sentiment_temperature(
     else:
         sentiment = "EXTREME_GREED"
 
+    # VIX label override on extremes (broad panic outweighs tech-only sentiment)
+    if vix is not None:
+        if vix >= 30:
+            sentiment = "EXTREME_FEAR"
+        elif vix >= 25 and sentiment in ("NEUTRAL", "GREED", "EXTREME_GREED"):
+            sentiment = "FEAR"
+
     result = {
         "temperature": temperature,
+        "pc_temperature": pc_temp,
+        "vix_temperature": vix_temp,
+        "vix": round(vix, 2) if vix is not None else None,
+        "vix_weight": vix_weight if vix is not None else 0.0,
         "put_call_ratio": pc_ratio,
         "ratio_type": pc_data.get("ratio_type", "unknown"),
         "ticker_used": ticker_used,

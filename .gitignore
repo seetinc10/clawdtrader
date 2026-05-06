@@ -13,6 +13,10 @@ __pycache__/
 dist/
 build/
 .env
+.env.*
+!.env.example
+.claude/
+.codex/
 
 runtime_env.json
 
@@ -76,6 +80,7 @@ data/.runtime_env.json
 data/sentiment/
 data/memory/
 data/agent_data/
+data/quick_backtests/
 
 # Test and temporary files
 test.py
@@ -122,3 +127,7 @@ test_*.py
 *__test*
 *_test.json
 *_backup_*
+!tests/
+!tests/test_*.py
+tests/.tmp/
+tests/__pycache__/

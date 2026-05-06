@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MCP Service Startup Script (Python Version)
-Start all four MCP services: Math, Search, TradeTools, LocalPrices
+Start the MCP services used by the US stock backtester.
 """
 
 import os
@@ -33,7 +33,6 @@ class MCPServiceManager:
             "search": int(os.getenv("SEARCH_HTTP_PORT", "8001")),
             "trade": int(os.getenv("TRADE_HTTP_PORT", "8002")),
             "price": int(os.getenv("GETPRICE_HTTP_PORT", "8003")),
-            "crypto": int(os.getenv("CRYPTO_HTTP_PORT", "8005")),
             "indicators": int(os.getenv("INDICATORS_HTTP_PORT", "8004")),
             "sentiment": int(os.getenv("SENTIMENT_HTTP_PORT", "8006")),
         }
@@ -46,7 +45,6 @@ class MCPServiceManager:
             "search": {"script": os.path.join(mcp_server_dir, "tool_alphavantage_news.py"), "name": "Search", "port": self.ports["search"]},  
             "trade": {"script": os.path.join(mcp_server_dir, "tool_trade.py"), "name": "TradeTools", "port": self.ports["trade"]},
             "price": {"script": os.path.join(mcp_server_dir, "tool_get_price_local.py"), "name": "LocalPrices", "port": self.ports["price"]},
-            "crypto": {"script": os.path.join(mcp_server_dir, "tool_crypto_trade.py"), "name": "CryptoTradeTools", "port": self.ports["crypto"]},
             "indicators": {"script": os.path.join(mcp_server_dir, "tool_indicators.py"), "name": "TechnicalIndicators", "port": self.ports["indicators"]},
             "sentiment": {"script": os.path.join(mcp_server_dir, "tool_sentiment_temperature.py"), "name": "SentimentTemperature", "port": self.ports["sentiment"]},
         }

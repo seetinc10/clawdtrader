@@ -7,11 +7,11 @@ class DataLoader {
         this.priceCache = {};
         this.config = null;
         this.baseDataPath = './data';
-        this.currentMarket = 'us'; // 'us' or 'cn'
+        this.currentMarket = 'us';
         this.cacheManager = new CacheManager(); // Initialize cache manager
     }
 
-    // Switch market between US stocks and A-shares
+    // Switch market
     setMarket(market) {
         this.currentMarket = market;
         this.agentData = {};
@@ -96,7 +96,7 @@ class DataLoader {
         }
     }
 
-    // Load all A-share stock prices from merged.jsonl
+    // Load all merged stock prices when using a shared market data file
     async loadAStockPrices() {
         if (Object.keys(this.priceCache).length > 0) {
             return this.priceCache;
@@ -106,11 +106,11 @@ class DataLoader {
             const marketConfig = this.getMarketConfig();
             // Default to merged.jsonl if not specified
             const priceFile = marketConfig && marketConfig.price_data_file ? 
-                marketConfig.price_data_file : 'A_stock/merged.jsonl';
+                marketConfig.price_data_file : 'merged.jsonl';
             
-            console.log(`Loading A-share prices from ${priceFile}...`);
+            console.log(`Loading merged prices from ${priceFile}...`);
             const response = await fetch(`${this.baseDataPath}/${priceFile}`);
-            if (!response.ok) throw new Error(`Failed to load A-share prices from ${priceFile}`);
+            if (!response.ok) throw new Error(`Failed to load merged prices from ${priceFile}`);
 
             const text = await response.text();
             const lines = text.trim().split('\n');
@@ -123,10 +123,10 @@ class DataLoader {
                 this.priceCache[symbol] = data['Time Series (Daily)'] || data['Time Series (60min)'];
             }
 
-            console.log(`Loaded prices for ${Object.keys(this.priceCache).length} A-share stocks`);
+            console.log(`Loaded prices for ${Object.keys(this.priceCache).length} stocks`);
             return this.priceCache;
         } catch (error) {
-            console.error('Error loading A-share prices:', error);
+            console.error('Error loading merged prices:', error);
             return {};
         }
     }
@@ -138,7 +138,7 @@ class DataLoader {
         }
 
         if (this.currentMarket.startsWith('cn')) {
-            // For A-shares, load all prices at once
+            // For shared merged datasets, load all prices at once
             await this.loadAStockPrices();
             return this.priceCache[symbol] || null;
         }
@@ -186,7 +186,7 @@ class DataLoader {
             return closePrice ? parseFloat(closePrice) : null;
         }
 
-        // For A-shares: Extract date only for daily data matching
+        // Extract date only for daily data matching
         // Only do this fuzzy matching if we are NOT in hourly mode or if exact match failed
         if (this.currentMarket.startsWith('cn')) {
             const dateOnly = dateOrTimestamp.split(' ')[0]; // "2025-10-01 10:00:00" -> "2025-10-01"
@@ -231,7 +231,7 @@ class DataLoader {
             }
         }
 
-        // For A-shares: If any stock price is missing, return null to skip this date
+        // For shared merged datasets: if any stock price is missing, skip this date
         if (this.currentMarket.startsWith('cn') && hasMissingPrice) {
             return null;
         }
@@ -256,7 +256,7 @@ class DataLoader {
         const isHourlyConfig = marketConfig && marketConfig.time_granularity === 'hourly';
 
         if (this.currentMarket.startsWith('cn') && !isHourlyConfig) {
-            // A-SHARES DAILY LOGIC: Handle multiple transactions per day AND fill date gaps
+            // Shared daily merged-data logic: handle multiple transactions per day and fill date gaps
             // Used only for 'cn' (daily) market, not 'cn_hour'
 
             // Detect if data is hourly or daily
@@ -431,7 +431,7 @@ class DataLoader {
         return result;
     }
 
-    // Load benchmark data (QQQ for US, SSE 50 for A-shares)
+    // Load benchmark data
     async loadBenchmarkData() {
         const marketConfig = this.getMarketConfig();
         if (!marketConfig) {
@@ -467,32 +467,31 @@ class DataLoader {
         return dailyData;
     }
 
-    // Load SSE 50 Index data for A-shares
+    // Legacy benchmark loader for merged-data markets
     async loadSSE50Data() {
         try {
-            console.log('Loading SSE 50 Index data...');
-            // Always use daily SSE 50 data, even in hourly mode
-            const benchmarkFile = 'A_stock/index_daily_sse_50.json';
+            console.log('Loading fallback benchmark data...');
+            const marketConfig = this.getMarketConfig();
+            const benchmarkFile = marketConfig ? marketConfig.benchmark_file : 'Adaily_prices_QQQ.json';
 
             const response = await fetch(`${this.baseDataPath}/${benchmarkFile}`);
-            if (!response.ok) throw new Error('Failed to load SSE 50 Index data');
+            if (!response.ok) throw new Error('Failed to load fallback benchmark data');
 
             const data = await response.json();
             const timeSeries = data['Time Series (Daily)'];
 
             if (!timeSeries) {
-                console.warn('SSE 50 Index data not found');
+                console.warn('Fallback benchmark data not found');
                 return null;
             }
 
-            const marketConfig = this.getMarketConfig();
-            const benchmarkName = marketConfig ? marketConfig.benchmark_display_name : 'SSE 50';
+            const benchmarkName = marketConfig ? marketConfig.benchmark_display_name : 'Benchmark';
             
             // For hourly mode, we need to expand daily benchmark to match hourly agent timestamps
             const isHourlyMode = this.currentMarket === 'cn_hour';
             return this.createBenchmarkAssetHistory(benchmarkName, timeSeries, 'CNY', isHourlyMode);
         } catch (error) {
-            console.error('Error loading SSE 50 data:', error);
+            console.error('Error loading fallback benchmark data:', error);
             return null;
         }
     }
@@ -725,7 +724,7 @@ class DataLoader {
         console.log('Final allData:', Object.keys(allData));
         this.agentData = allData;
 
-        // Load benchmark data (QQQ for US, SSE 50 for A-shares)
+        // Load benchmark data
         const benchmarkData = await this.loadBenchmarkData();
         if (benchmarkData) {
             allData[benchmarkData.name] = benchmarkData;

@@ -18,7 +18,9 @@ from tools.memory_tools import (
     save_strategy_insight,
     save_trade_outcome,
     get_trade_outcomes,
-    get_win_rate
+    get_win_rate,
+    record_insight_outcome,
+    get_relevant_insights,
 )
 
 
@@ -28,11 +30,11 @@ class PerformanceTracker:
     Integrates with the memory system to learn from past trades.
     """
 
-    # Thresholds for generating insights
-    WIN_THRESHOLD = 2.0      # % gain to count as win
-    LOSS_THRESHOLD = -2.0    # % loss to count as loss
-    BIG_WIN_THRESHOLD = 5.0  # % gain for notable win
-    BIG_LOSS_THRESHOLD = -5.0  # % loss for notable loss
+    # Thresholds for generating insights (D: lowered so most trades teach something)
+    WIN_THRESHOLD = 1.0
+    LOSS_THRESHOLD = -1.0
+    BIG_WIN_THRESHOLD = 3.0
+    BIG_LOSS_THRESHOLD = -3.0
 
     def __init__(self, signature: str):
         """
@@ -222,9 +224,19 @@ class PerformanceTracker:
                 overall_outcome = "loss"
             else:
                 overall_outcome = "neutral"
-            # Use the oldest buy's reasoning/context for the insight
             first_buy = {"price": avg_entry, "reasoning": reasoning}
             self._generate_trade_insight(symbol, overall_pct, overall_outcome, first_buy, reasoning)
+
+            # E: credit/blame the insights that were active when this trade was decided
+            if overall_outcome in ("win", "loss"):
+                try:
+                    active = get_relevant_insights(symbols=[symbol], n=10)
+                    record_insight_outcome(
+                        insight_ids=[e["id"] for e in active if "id" in e],
+                        won=(overall_outcome == "win"),
+                    )
+                except Exception as e:
+                    print(f"[tracker] insight outcome update failed: {e}")
 
         # If sell_remaining > 0, record the unmatched portion as neutral
         if sell_remaining > 0:
@@ -249,40 +261,39 @@ class PerformanceTracker:
         """Generate insights from notable trade outcomes."""
         buy_reasoning = buy_trade.get("reasoning", "")
 
-        if profit_pct >= self.BIG_WIN_THRESHOLD:
-            # Big win - what worked?
-            insight = f"Successful {symbol} trade (+{profit_pct:.1f}%)"
+        # D: emit insights for any meaningful win/loss; tag with magnitude so
+        # the prompt formatter can surface "big" vs "small" appropriately.
+        if profit_pct >= self.WIN_THRESHOLD:
+            mag = "big-win" if profit_pct >= self.BIG_WIN_THRESHOLD else "win"
+            insight = f"Profitable {symbol} trade (+{profit_pct:.1f}%)"
             if buy_reasoning:
-                insight += f" - bought because: {buy_reasoning[:100]}"
-
+                insight += f" - thesis worked: {buy_reasoning[:100]}"
             save_strategy_insight(
                 insight=insight,
                 context={
                     "symbol": symbol,
                     "profit_pct": profit_pct,
                     "buy_reasoning": buy_reasoning,
-                    "sell_reasoning": sell_reasoning
+                    "sell_reasoning": sell_reasoning,
                 },
                 source="performance",
-                tags=["win", symbol.lower()]
+                tags=[mag, symbol.lower()],
             )
-
-        elif profit_pct <= self.BIG_LOSS_THRESHOLD:
-            # Big loss - what to avoid?
+        elif profit_pct <= self.LOSS_THRESHOLD:
+            mag = "big-loss" if profit_pct <= self.BIG_LOSS_THRESHOLD else "loss"
             insight = f"Loss on {symbol} ({profit_pct:.1f}%)"
             if buy_reasoning:
                 insight += f" - avoid: {buy_reasoning[:100]}"
-
             save_strategy_insight(
                 insight=insight,
                 context={
                     "symbol": symbol,
                     "profit_pct": profit_pct,
                     "buy_reasoning": buy_reasoning,
-                    "sell_reasoning": sell_reasoning
+                    "sell_reasoning": sell_reasoning,
                 },
                 source="performance",
-                tags=["loss", symbol.lower(), "lesson"]
+                tags=[mag, symbol.lower(), "lesson"],
             )
 
     def analyze_symbol_performance(self, symbol: str) -> Dict[str, Any]:

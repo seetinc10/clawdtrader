@@ -88,7 +88,11 @@ def save_strategy_insight(
             "context": context or {},
             "source": source,
             "tags": tags or [],
-            "active": True  # Can be deactivated if insight proves wrong
+            "active": True,
+            # Scoring fields (E): track how this insight performed when followed
+            "referenced": 0,      # how many decisions cited it
+            "wins_after": 0,      # closed trades that won after referencing
+            "losses_after": 0,    # closed trades that lost after referencing
         }
 
         with open(STRATEGY_MEMORY_FILE, "a", encoding="utf-8") as f:
@@ -477,40 +481,300 @@ def clear_all_memory(confirm: bool = False) -> bool:
 # QUICK ACCESS FOR PROMPTS
 # =============================================================================
 
-def get_memory_context_for_prompt() -> str:
+def get_memory_context_for_prompt(symbols: Optional[List[str]] = None) -> str:
     """
-    Get a comprehensive memory context string for injection into prompts.
-    Includes insights, recent performance, and patterns.
+    Comprehensive memory context for prompt injection.
+
+    If `symbols` is given, retrieval is filtered + ranked by relevance to those
+    tickers (A + F). Per-symbol win-rate stats are also injected (B).
     """
     lines = []
 
-    # Strategy insights
-    insights = format_insights_for_prompt(n=10)
+    # ---- Strategy insights (relevance-ranked if we have symbols) ----
+    if symbols:
+        relevant = get_relevant_insights(symbols=symbols, n=10)
+    else:
+        relevant = get_strategy_insights(n=10)
+
     lines.append("## LEARNED STRATEGY INSIGHTS:")
-    lines.append(insights)
+    if relevant:
+        for i, e in enumerate(relevant, 1):
+            score = _insight_quality(e)
+            tag_str = f" [{', '.join(e.get('tags', []))}]" if e.get("tags") else ""
+            qual_str = f" ({e.get('wins_after', 0)}W/{e.get('losses_after', 0)}L)" if e.get("referenced", 0) else ""
+            lines.append(f"{i}. {e.get('insight','')}{tag_str}{qual_str}")
+    else:
+        lines.append("(none yet)")
     lines.append("")
 
-    # Win rate
+    # ---- Per-symbol stats (B) ----
+    if symbols:
+        stats_block = format_symbol_stats(symbols)
+        if stats_block:
+            lines.append("## PER-SYMBOL TRACK RECORD:")
+            lines.append(stats_block)
+            lines.append("")
+
+    # ---- Aggregate win rate ----
     win_stats = get_win_rate()
     if win_stats["total_trades"] > 0:
-        lines.append("## TRADING PERFORMANCE:")
-        lines.append(f"- Win rate: {win_stats['win_rate']:.1f}%")
-        lines.append(f"- Total trades analyzed: {win_stats['total_trades']}")
-        lines.append(f"- Wins: {win_stats['wins']}, Losses: {win_stats['losses']}")
+        lines.append("## OVERALL PERFORMANCE:")
+        lines.append(
+            f"- Win rate: {win_stats['win_rate']:.1f}%  "
+            f"({win_stats['wins']}W / {win_stats['losses']}L, "
+            f"{win_stats['total_trades']} total)"
+        )
         lines.append("")
 
-    # Recent losses to learn from
+    # ---- Recent losses ----
     recent_losses = get_trade_outcomes(n=5, outcome="loss")
     if recent_losses:
         lines.append("## RECENT LOSSES TO LEARN FROM:")
         for loss in recent_losses[-3:]:
-            symbol = loss.get("symbol", "?")
-            pct = loss.get("profit_pct", 0)
-            reason = loss.get("reasoning", "")[:50]
-            lines.append(f"- {symbol}: {pct:.1f}% loss - {reason}")
+            sym = loss.get("symbol", "?")
+            pct = loss.get("profit_pct", 0) or 0
+            reason = (loss.get("reasoning", "") or "")[:60]
+            lines.append(f"- {sym}: {pct:.1f}% loss - {reason}")
         lines.append("")
 
     return "\n".join(lines)
+
+
+# =============================================================================
+# RELEVANCE RANKING (A + F)
+# =============================================================================
+
+_STOP = {"the","a","an","is","of","to","in","on","and","or","for","at","by","with",
+         "from","this","that","be","as","it","its","was","were","are","but","if",
+         "than","then","too","not","no","do","does"}
+
+
+def _tokens(text: str) -> set:
+    """Lowercase alphanumeric token set, stopwords removed."""
+    if not text:
+        return set()
+    out = set()
+    cur = []
+    for ch in text.lower():
+        if ch.isalnum():
+            cur.append(ch)
+        else:
+            if cur:
+                tok = "".join(cur)
+                if tok not in _STOP and len(tok) > 1:
+                    out.add(tok)
+                cur = []
+    if cur:
+        tok = "".join(cur)
+        if tok not in _STOP and len(tok) > 1:
+            out.add(tok)
+    return out
+
+
+def _insight_quality(entry: Dict[str, Any]) -> float:
+    """E: quality score from track record. 0.5 prior, Beta-like update."""
+    w = entry.get("wins_after", 0)
+    l = entry.get("losses_after", 0)
+    return (w + 1) / (w + l + 2)
+
+
+def _relevance_score(entry: Dict[str, Any], symbol_set: set, query_tokens: set) -> float:
+    """
+    Combined score for ranking insights for a decision context.
+      - Tag match against current symbols (A)            : +3.0 each
+      - Token overlap (Jaccard) with query/insight (F)   : up to +2.0
+      - Quality from past outcomes (E)                   : 0..+1.0
+      - Recency bonus (newer ranked higher)              : tiny tiebreaker
+    """
+    tags = {t.lower() for t in entry.get("tags", [])}
+    insight_text = entry.get("insight", "")
+    insight_tokens = _tokens(insight_text)
+
+    score = 0.0
+    score += 3.0 * len(tags & symbol_set)
+
+    if query_tokens and insight_tokens:
+        inter = len(query_tokens & insight_tokens)
+        union = len(query_tokens | insight_tokens) or 1
+        score += 2.0 * (inter / union)
+
+    score += _insight_quality(entry)
+
+    # recency tiebreaker (id is monotonic)
+    score += 0.001 * entry.get("id", 0)
+    return score
+
+
+def get_relevant_insights(
+    symbols: List[str],
+    query: str = "",
+    n: int = 10,
+    pool: int = 200,
+) -> List[Dict[str, Any]]:
+    """Pick the most relevant active insights for a decision context."""
+    pool_insights = get_strategy_insights(n=pool, active_only=True)
+    if not pool_insights:
+        return []
+
+    symbol_set = {s.lower() for s in symbols}
+    query_tokens = _tokens(" ".join(symbols) + " " + (query or ""))
+
+    scored = [(_relevance_score(e, symbol_set, query_tokens), e) for e in pool_insights]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in scored[:n]]
+
+
+# =============================================================================
+# PER-SYMBOL STATS (B)
+# =============================================================================
+
+def get_symbol_track_record(symbol: str) -> Dict[str, Any]:
+    """Aggregate stats for a single symbol from closed trades."""
+    outcomes = get_trade_outcomes(n=1000, symbol=symbol)
+    closed = [o for o in outcomes if o.get("outcome") in ("win", "loss", "neutral")]
+    wins = [o for o in closed if o.get("outcome") == "win"]
+    losses = [o for o in closed if o.get("outcome") == "loss"]
+    avg_pct = (
+        sum((o.get("profit_pct") or 0) for o in closed) / len(closed)
+        if closed else 0.0
+    )
+    return {
+        "symbol": symbol,
+        "wins": len(wins),
+        "losses": len(losses),
+        "neutral": len([o for o in closed if o.get("outcome") == "neutral"]),
+        "total_closed": len(closed),
+        "avg_profit_pct": avg_pct,
+    }
+
+
+def format_symbol_stats(symbols: List[str]) -> str:
+    """Compact per-symbol track record block. Empty string if no history."""
+    rows = []
+    for sym in symbols:
+        s = get_symbol_track_record(sym)
+        if s["total_closed"] > 0:
+            rows.append(
+                f"- {sym}: {s['wins']}W/{s['losses']}L  "
+                f"avg {s['avg_profit_pct']:+.2f}%"
+            )
+    return "\n".join(rows)
+
+
+# =============================================================================
+# INSIGHT SCORING / DECAY (E)
+# =============================================================================
+
+def record_insight_outcome(
+    insight_ids: List[int],
+    won: bool,
+    auto_deactivate_after: int = 3,
+) -> None:
+    """Update referenced/wins_after/losses_after for the given insights.
+    Auto-deactivate insights with N losses and zero wins."""
+    if not insight_ids or not STRATEGY_MEMORY_FILE.exists():
+        return
+    id_set = set(insight_ids)
+    with _file_lock(STRATEGY_MEMORY_FILE):
+        out_lines = []
+        with open(STRATEGY_MEMORY_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    out_lines.append(line.rstrip("\n"))
+                    continue
+                if e.get("id") in id_set:
+                    e["referenced"] = e.get("referenced", 0) + 1
+                    if won:
+                        e["wins_after"] = e.get("wins_after", 0) + 1
+                    else:
+                        e["losses_after"] = e.get("losses_after", 0) + 1
+                    if (
+                        e.get("active", True)
+                        and e.get("losses_after", 0) >= auto_deactivate_after
+                        and e.get("wins_after", 0) == 0
+                    ):
+                        e["active"] = False
+                        e["deactivated_at"] = datetime.now().isoformat()
+                        e["deactivation_reason"] = (
+                            f"auto: {e['losses_after']}L/{e['wins_after']}W after referencing"
+                        )
+                out_lines.append(json.dumps(e, ensure_ascii=False))
+        with open(STRATEGY_MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(out_lines) + "\n")
+
+
+# =============================================================================
+# REFLECTION (C)
+# =============================================================================
+
+def reflect_on_session(
+    openai_client,
+    model: str,
+    signature: str = "live-trader-gui",
+    lookback_hours: int = 24,
+) -> List[str]:
+    """Ask the LLM to distill recent trades into 1-3 portable rules.
+    Saves each as a strategy insight tagged 'reflection'. Returns the list."""
+    from datetime import timedelta
+    cutoff = datetime.now() - timedelta(hours=lookback_hours)
+    outcomes = get_trade_outcomes(n=200)
+    recent = []
+    for o in outcomes:
+        try:
+            ts = datetime.fromisoformat(o.get("timestamp", ""))
+            if ts >= cutoff:
+                recent.append(o)
+        except Exception:
+            continue
+    if not recent:
+        return []
+
+    summary_lines = []
+    for o in recent[-40:]:
+        summary_lines.append(
+            f"- {o.get('action','?').upper()} {o.get('symbol','?')} x{o.get('amount','?')} "
+            f"@ ${o.get('entry_price','?')} → {o.get('outcome','pending')} "
+            f"({(o.get('profit_pct') or 0):+.2f}%) :: {(o.get('reasoning','') or '')[:80]}"
+        )
+    trades_text = "\n".join(summary_lines)
+
+    prompt = (
+        "You are reviewing a trading session. From the trade log below, extract "
+        "1 to 3 SHORT, ACTIONABLE rules a trading agent can apply going forward. "
+        "Each rule must be concrete (mention symbol, condition, or pattern) and one line. "
+        "Reply with ONLY the rules, one per line, no numbering, no preamble.\n\n"
+        f"TRADES:\n{trades_text}\n"
+    )
+    try:
+        resp = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            timeout=120,
+        )
+        text = resp.choices[0].message.content or ""
+    except Exception as e:
+        print(f"[reflect] LLM call failed: {e}")
+        return []
+
+    rules = [ln.strip("-• \t") for ln in text.splitlines() if ln.strip()]
+    rules = [r for r in rules if 8 < len(r) < 240][:3]
+
+    saved = []
+    for r in rules:
+        tag_syms = [s.lower() for s in {o.get("symbol", "") for o in recent} if s]
+        save_strategy_insight(
+            insight=r,
+            context={"trade_count": len(recent)},
+            source="reflection",
+            tags=["reflection"] + tag_syms[:5],
+        )
+        saved.append(r)
+    return saved
 
 
 if __name__ == "__main__":

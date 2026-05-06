@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 from tools.general_tools import get_config_value
-from tools.price_tools import (all_nasdaq_100_symbols, all_sse_50_symbols,
+from tools.price_tools import (all_nasdaq_100_symbols,
                                format_price_dict_with_names, get_open_prices,
                                get_today_init_position, get_yesterday_date,
                                get_yesterday_open_and_close_price,
@@ -88,9 +88,9 @@ def get_agent_system_prompt(
     print(f"today_date: {today_date}")
     print(f"market: {market}")
 
-    # Auto-select stock symbols based on market if not provided
+    # Auto-select stock symbols when not provided.
     if stock_symbols is None:
-        stock_symbols = all_sse_50_symbols if market == "cn" else all_nasdaq_100_symbols
+        stock_symbols = all_nasdaq_100_symbols
 
     # Get yesterday's buy and sell prices
     yesterday_buy_prices, yesterday_sell_prices = get_yesterday_open_and_close_price(

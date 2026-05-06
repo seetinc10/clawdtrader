@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Clawdbot Live Trader GUI - Real-time AI Trading with Alpaca
 Console window with pause/resume functionality
@@ -7,11 +7,10 @@ Now with integrated Strategy Chat!
 
 import os
 import sys
-import json
 import time
 import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import tkinter as tk
 from tkinter import scrolledtext, ttk
@@ -20,6 +19,14 @@ load_dotenv()
 
 import alpaca_trade_api as tradeapi
 from openai import OpenAI
+from tools.live_trading_utils import (
+    build_trading_prompt,
+    enforce_position_limit,
+    fetch_current_prices as fetch_live_prices,
+    get_memory_section,
+    get_portfolio_status as load_portfolio_status,
+    request_ai_decision,
+)
 
 # Import memory tools
 try:
@@ -44,23 +51,75 @@ except ImportError:
     SENTIMENT_ENABLED = False
 
 # Configuration
-SYMBOLS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+SYMBOLS = [
+    # Mag 7
+    "AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA",
+    # Compute semis
+    "AMD", "AVGO", "TSM", "ARM", "QCOM", "INTC",
+    # Memory + semicap
+    "MU", "ASML", "LRCX", "AMAT", "KLAC",
+    # Analog / power semis
+    "ON", "ADI", "TXN",
+    # AI networking / connectivity silicon
+    "ANET", "MRVL", "ALAB", "CRDO",
+    # Optical transceivers
+    "COHR", "LITE",
+    # AI servers / OEMs
+    "SMCI", "DELL", "HPE", "IBM",
+    # Enterprise AI / cloud software
+    "ORCL", "CRM", "NOW", "SNOW", "MDB", "PLTR",
+    # AI ops + edge + cyber
+    "DDOG", "NET", "CRWD", "PANW", "ZS",
+    # AI-native apps
+    "ADBE", "INTU", "RBLX",
+    # Power & data-center physical
+    "VRT", "ETN", "GEV",
+    # IPP / nuclear utilities feeding hyperscalers
+    "CEG", "VST", "TLN",
+    # Data-center REITs
+    "DLR", "EQIX",
+    # Pure-play AI cloud
+    "CRWV", "NBIS",
+    # AI HPC hosting (ex-miners)
+    "IREN", "APLD",
+    # Robotics / physical AI
+    "ISRG", "SYM", "TER",
+    # China AI ADRs
+    "BABA", "BIDU", "PDD",
+    # AI advertising / training-data
+    "TTD", "APP", "RDDT",
+]
 TRADE_INTERVAL = 60
 MAX_POSITION_SIZE = 0.2
 
+# Risk guardrails (deterministic â€” fire even if the LLM hallucinates)
+STOP_LOSS_PCT = -3.0          # auto-sell a position when unrealized P/L hits this
+TAKE_PROFIT_PCT = 5.0         # auto-sell at this gain
+DAILY_KILL_PCT = -2.0         # pause trading if portfolio drops this much intraday
+COOLDOWN_MINUTES = 30         # block re-buys on a symbol for N min after stop-out
+FORCE_FLAT_ENABLED = True     # flatten all positions before close
+FORCE_FLAT_HHMM_ET = "15:55"  # ET time to flatten
+
+# Quick watchlist backtest
+QUICK_BACKTEST_ENABLED = True
+QUICK_BACKTEST_LOOKBACK_POINTS = 6
+QUICK_BACKTEST_MAX_STEPS = 4
+QUICK_BACKTEST_INITIAL_CASH = 10_000.0
+QUICK_BACKTEST_LOG_PATH = "./data/quick_backtests"
+
 # AI Provider configurations
 AI_PROVIDERS = {
-    "DeepSeek (deepseek-chat)": {
-        "api_key_env": "DEEPSEEK_API_KEY",
-        "base_url_env": "DEEPSEEK_API_BASE",
-        "base_url_default": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat"
-    },
     "DeepSeek (deepseek-reasoner)": {
         "api_key_env": "DEEPSEEK_API_KEY",
         "base_url_env": "DEEPSEEK_API_BASE",
         "base_url_default": "https://api.deepseek.com/v1",
         "model": "deepseek-reasoner"
+    },
+    "DeepSeek (deepseek-chat)": {
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "base_url_env": "DEEPSEEK_API_BASE",
+        "base_url_default": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat"
     },
     "OpenAI (gpt-4o-mini)": {
         "api_key_env": "OPENAI_API_KEY",
@@ -132,10 +191,25 @@ class TradingGUI:
         else:
             self.tracker = None
 
+        # Curated watchlist (populated by scanner on first Start)
+        self.watchlist = None
+        self.quick_backtest_result = None
+        self.quick_backtest_prompt_block = ""
+        self.quick_backtest_running = False
+        self.quick_backtest_thread = None
+
+        # Risk-guardrail session state
+        self.session_start_value = None      # portfolio value when Start was clicked
+        self.cooldowns = {}                  # symbol -> datetime when cooldown ends
+        self.kill_switch_tripped = False     # daily DD kill switch
+        self.force_flat_done_today = False   # has end-of-day flatten run yet
+
         # AI Provider setup - select first available provider
         self.openai = None
         self.model = None
         self.current_provider = None
+        self.openai_api_key = None
+        self.openai_base_url = None
 
         # Try to find an available provider
         for provider_name in AI_PROVIDERS.keys():
@@ -162,6 +236,8 @@ class TradingGUI:
             return False
 
         self.openai = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        self.openai_api_key = api_key
+        self.openai_base_url = base_url
         self.model = config["model"]
         self.current_provider = provider_name
 
@@ -352,7 +428,7 @@ class TradingGUI:
         self.log("  CLAWDBOT LIVE TRADER INITIALIZED", 'header')
         self.log("=" * 60, 'header')
         self.log(f"AI Provider: {self.current_provider}", 'info')
-        self.log(f"Trading Symbols: {', '.join(SYMBOLS)}", 'info')
+        self.log(f"Universe: {len(SYMBOLS)} symbols (will curate top-10 watchlist on Start)", 'info')
         self.log(f"Trade Interval: {TRADE_INTERVAL} seconds", 'info')
         if MEMORY_ENABLED:
             self.log("Memory System: ENABLED", 'info')
@@ -368,11 +444,41 @@ class TradingGUI:
         self.account_update_thread = threading.Thread(target=self.account_update_loop, daemon=True)
         self.account_update_thread.start()
 
+    def _run_on_ui_thread(self, callback, *args, **kwargs):
+        """Marshal widget updates back to Tk's main thread."""
+        try:
+            if threading.current_thread() is threading.main_thread():
+                callback(*args, **kwargs)
+            else:
+                self.root.after(0, lambda: callback(*args, **kwargs))
+        except (RuntimeError, tk.TclError):
+            # The window may be closing while a background thread is still running.
+            pass
+
+    def _append_console_log(self, timestamp, message, tag):
+        self.console.insert('end', f"[{timestamp}] {message}\n", tag)
+        self.console.see('end')
+
     def log(self, message, tag='info'):
         """Log message to console"""
         timestamp = datetime.now().strftime('%H:%M:%S')
-        self.console.insert('end', f"[{timestamp}] {message}\n", tag)
-        self.console.see('end')
+        self._run_on_ui_thread(self._append_console_log, timestamp, message, tag)
+
+    def _render_account_display(self, cash, portfolio, total_pl, winners, losers):
+        self.cash_label.config(text=f"Cash: ${cash:,.2f}")
+        self.portfolio_label.config(text=f"Portfolio: ${portfolio:,.2f}")
+
+        if winners is None or losers is None or total_pl is None:
+            self.daily_pl_label.config(text="Daily P/L: $0.00", fg='#888888')
+            self.winrate_label.config(text="Win Rate: -- (no positions)")
+            return
+
+        total = winners + losers
+        win_rate = (winners / total * 100) if total > 0 else 0
+        sign = "+" if total_pl >= 0 else ""
+        pl_color = '#00ff88' if total_pl >= 0 else '#ff6b6b'
+        self.daily_pl_label.config(text=f"Daily P/L: {sign}${total_pl:,.2f}", fg=pl_color)
+        self.winrate_label.config(text=f"Win Rate: {win_rate:.0f}% ({winners}W/{losers}L)")
 
     def update_account_display(self):
         """Update account info display including P&L and win rate"""
@@ -380,8 +486,6 @@ class TradingGUI:
             account = self.api.get_account()
             cash = float(account.cash)
             portfolio = float(account.portfolio_value)
-            self.cash_label.config(text=f"Cash: ${cash:,.2f}")
-            self.portfolio_label.config(text=f"Portfolio: ${portfolio:,.2f}")
 
             # Update daily P/L and win rate
             positions = self.api.list_positions()
@@ -389,16 +493,19 @@ class TradingGUI:
                 total_pl = sum(float(p.unrealized_pl) for p in positions)
                 winners = sum(1 for p in positions if float(p.unrealized_pl) > 0)
                 losers = sum(1 for p in positions if float(p.unrealized_pl) < 0)
-                total = winners + losers
-                win_rate = (winners / total * 100) if total > 0 else 0
-
-                sign = "+" if total_pl >= 0 else ""
-                pl_color = '#00ff88' if total_pl >= 0 else '#ff6b6b'
-                self.daily_pl_label.config(text=f"Daily P/L: {sign}${total_pl:,.2f}", fg=pl_color)
-                self.winrate_label.config(text=f"Win Rate: {win_rate:.0f}% ({winners}W/{losers}L)")
             else:
-                self.daily_pl_label.config(text="Daily P/L: $0.00", fg='#888888')
-                self.winrate_label.config(text="Win Rate: -- (no positions)")
+                total_pl = None
+                winners = None
+                losers = None
+
+            self._run_on_ui_thread(
+                self._render_account_display,
+                cash,
+                portfolio,
+                total_pl,
+                winners,
+                losers,
+            )
         except Exception:
             pass  # Silently fail for background updates
 
@@ -504,9 +611,128 @@ class TradingGUI:
         self.log("  TRADING STARTED", 'header')
         self.log("=" * 40 + "\n", 'header')
 
+        # Run scanner once per session to curate the watchlist
+        if self.watchlist is None:
+            self._run_scanner()
+            self._start_quick_backtest()
+        elif self.quick_backtest_result is None and not self.quick_backtest_running:
+            self._start_quick_backtest()
+
+        # Snapshot starting equity for the daily-DD kill switch
+        try:
+            self.session_start_value = float(self.api.get_account().portfolio_value)
+            self.kill_switch_tripped = False
+            self.force_flat_done_today = False
+            self.cooldowns.clear()
+            self.log(
+                f"Session start equity: ${self.session_start_value:,.2f}  "
+                f"| stop-loss {STOP_LOSS_PCT}%  take-profit +{TAKE_PROFIT_PCT}%  "
+                f"daily kill {DAILY_KILL_PCT}%  cooldown {COOLDOWN_MINUTES}m  "
+                f"force-flat {FORCE_FLAT_HHMM_ET if FORCE_FLAT_ENABLED else 'OFF'} ET",
+                'info'
+            )
+        except Exception as e:
+            self.log(f"Could not snapshot starting equity: {e}", 'warning')
+
         # Start trading thread
         self.trade_thread = threading.Thread(target=self.trading_loop, daemon=True)
         self.trade_thread.start()
+
+    def _run_scanner(self):
+        """Scan the full universe and pick the top-10 movers as today's watchlist."""
+        try:
+            from tools.scanner import scan_top_movers
+            self.log(f"Scanning {len(SYMBOLS)}-symbol universe...", 'info')
+            top = scan_top_movers(self.api, SYMBOLS, top_n=10)
+            if top:
+                self.watchlist = [r['symbol'] for r in top]
+                self.log(f"Watchlist: {', '.join(self.watchlist)}", 'info')
+                for r in top:
+                    self.log(
+                        f"  {r['symbol']:6s} ${r['price']:>8.2f}  "
+                        f"{r['pct_change']:+6.2f}%  relvol={r['rel_vol']:.2f}x  "
+                        f"score={r['score']:.1f}",
+                        'info'
+                    )
+            else:
+                self.log("Scanner returned nothing â€” falling back to first 10 symbols.", 'warning')
+                self.watchlist = SYMBOLS[:10]
+        except Exception as e:
+            self.log(f"Scanner failed: {e} â€” using first 10 symbols.", 'error')
+            self.watchlist = SYMBOLS[:10]
+
+    def _start_quick_backtest(self):
+        """Run a short watchlist-only backtest in the background."""
+        if not QUICK_BACKTEST_ENABLED or not self.watchlist:
+            return
+        if self.quick_backtest_thread and self.quick_backtest_thread.is_alive():
+            return
+        if not self.model or not self.openai_api_key:
+            self.log("Quick backtest skipped: no active AI provider/API key.", 'warning')
+            return
+
+        self.quick_backtest_result = None
+        self.quick_backtest_prompt_block = ""
+        self.quick_backtest_running = True
+        self.log(
+            f"Starting quick backtest on today's {len(self.watchlist)}-name watchlist "
+            f"({QUICK_BACKTEST_LOOKBACK_POINTS} recent points, {QUICK_BACKTEST_MAX_STEPS} max steps)...",
+            'info'
+        )
+        self.log(f"Quick backtest model: {self.model}", 'info')
+        self.quick_backtest_thread = threading.Thread(target=self._run_quick_backtest, daemon=True)
+        self.quick_backtest_thread.start()
+
+    def _run_quick_backtest(self):
+        try:
+            from tools.quick_backtest import run_quick_backtest
+
+            result = run_quick_backtest(
+                symbols=self.watchlist or [],
+                basemodel=self.model,
+                openai_api_key=self.openai_api_key,
+                openai_base_url=self.openai_base_url,
+                market="us",
+                lookback_points=QUICK_BACKTEST_LOOKBACK_POINTS,
+                max_steps=QUICK_BACKTEST_MAX_STEPS,
+                initial_cash=QUICK_BACKTEST_INITIAL_CASH,
+                log_path=QUICK_BACKTEST_LOG_PATH,
+                max_position_size=MAX_POSITION_SIZE,
+                stop_loss_pct=STOP_LOSS_PCT,
+                take_profit_pct=TAKE_PROFIT_PCT,
+            )
+            self.quick_backtest_result = result
+
+            if not result.success:
+                self.quick_backtest_prompt_block = ""
+                self.log(result.message, 'warning')
+                return
+
+            self.quick_backtest_prompt_block = result.prompt_block
+            if result.message and result.message != f"Quick backtest completed with {self.model}.":
+                self.log(result.message, 'info')
+            self.log("Quick backtest complete. Live AI will use this as a weak prior:", 'info')
+            if result.prompt_block:
+                self.log(result.prompt_block, 'info')
+            if result.saved_insights:
+                self.log(f"Saved {len(result.saved_insights)} quick-backtest memory insight(s):", 'info')
+                for insight in result.saved_insights:
+                    self.log(f"  - {insight}", 'info')
+                self.update_memory_stats()
+        except Exception as e:
+            self.quick_backtest_prompt_block = ""
+            self.log(f"Quick backtest error: {e}", 'error')
+        finally:
+            self.quick_backtest_running = False
+
+    def _compose_memory_section(self, symbols):
+        """Combine persistent memory with quick-backtest context when available."""
+        memory_section = get_memory_section(symbols=symbols, log_fn=self.log)
+        if self.quick_backtest_prompt_block:
+            if memory_section.strip():
+                return f"{memory_section.rstrip()}\n\n{self.quick_backtest_prompt_block}\n"
+            return f"{self.quick_backtest_prompt_block}\n"
+        return memory_section
 
     def toggle_pause(self):
         """Toggle pause state"""
@@ -535,6 +761,24 @@ class TradingGUI:
 
         # Liquidate in separate thread to not freeze GUI
         threading.Thread(target=self.liquidate_all_positions, daemon=True).start()
+        # Run end-of-session reflection (C) â€” distill today's trades into rules
+        if MEMORY_ENABLED and self.openai and self.model:
+            threading.Thread(target=self._run_reflection, daemon=True).start()
+
+    def _run_reflection(self):
+        """End-of-session reflection: ask the LLM to distill rules from today's trades."""
+        try:
+            from tools.memory_tools import reflect_on_session
+            self.log("Reflecting on today's trades...", 'info')
+            rules = reflect_on_session(self.openai, self.model)
+            if rules:
+                self.log(f"Saved {len(rules)} reflection insight(s):", 'info')
+                for r in rules:
+                    self.log(f"  - {r}", 'info')
+            else:
+                self.log("No trades to reflect on (or reflection produced no rules).", 'warning')
+        except Exception as e:
+            self.log(f"Reflection failed: {e}", 'error')
 
     def liquidate_all_positions(self):
         """Sell all positions"""
@@ -571,12 +815,11 @@ class TradingGUI:
                         self.log(f"  Error selling {pos.symbol}: {e}", 'error')
 
             # Wait for orders to settle
-            import time
             time.sleep(2)
 
             # Update display
             self.update_account_display()
-            self.trade_label.config(text=f"Trades: {self.trade_count}")
+            self.update_trade_count_display()
 
             self.log("\n*** ALL POSITIONS LIQUIDATED ***", 'warning')
             self.log("*** TRADING STOPPED ***\n", 'error')
@@ -585,174 +828,153 @@ class TradingGUI:
             self.log(f"Liquidation error: {e}", 'error')
 
         finally:
-            self.start_btn.config(state='normal')
-            self.provider_dropdown.config(state='readonly')
-            self.status_label.config(text="Status: STOPPED", fg='#ff6b6b')
+            self._run_on_ui_thread(self._set_stopped_state)
 
     def get_current_prices(self):
-        """Get current prices"""
-        prices = {}
-        try:
-            bars = self.api.get_latest_bars(SYMBOLS)
-            for symbol in SYMBOLS:
-                if symbol in bars:
-                    prices[symbol] = {
-                        'price': float(bars[symbol].c),
-                        'open': float(bars[symbol].o),
-                        'high': float(bars[symbol].h),
-                        'low': float(bars[symbol].l),
-                        'volume': int(bars[symbol].v)
-                    }
-        except Exception as e:
-            self.log(f"Error getting prices: {e}", 'error')
-        return prices
+        """Get current prices for the curated watchlist (falls back to full universe)."""
+        symbols = self.watchlist or SYMBOLS
+        return fetch_live_prices(self.api, symbols, log_fn=self.log)
 
     def get_portfolio_status(self):
         """Get portfolio status"""
-        account = self.api.get_account()
-        positions = self.api.list_positions()
-
-        status = f"""
-ACCOUNT STATUS:
-- Cash: ${float(account.cash):,.2f}
-- Portfolio Value: ${float(account.portfolio_value):,.2f}
-- Buying Power: ${float(account.buying_power):,.2f}
-
-CURRENT POSITIONS:
-"""
-        if positions:
-            for pos in positions:
-                pnl = float(pos.unrealized_pl)
-                pnl_pct = float(pos.unrealized_plpc) * 100
-                status += f"- {pos.symbol}: {pos.qty} shares @ ${float(pos.avg_entry_price):.2f} (P/L: ${pnl:,.2f} / {pnl_pct:.1f}%)\n"
-        else:
-            status += "- No positions\n"
-
-        return status, float(account.cash), float(account.buying_power)
+        return load_portfolio_status(self.api)
 
     def get_ai_decision(self, prices, portfolio_status, cash, buying_power):
         """Get AI trading decision with memory context"""
-        price_info = "CURRENT MARKET PRICES:\n"
-        for symbol, data in prices.items():
-            change = ((data['price'] - data['open']) / data['open']) * 100
-            price_info += f"- {symbol}: ${data['price']:.2f} (Today: {change:+.2f}%)\n"
-
-        # Get memory context if available
-        memory_section = ""
-        if MEMORY_ENABLED:
-            try:
-                memory_context = get_memory_context_for_prompt()
-                if memory_context and "No previous strategy insights" not in memory_context:
-                    memory_section = f"""
-STRATEGY MEMORY (Apply these learnings!):
-{memory_context}
-"""
-            except Exception as e:
-                self.log(f"Memory load error: {e}", 'warning')
-
-        prompt = f"""You are Clawdbot, an AI stock trader with memory of past strategies.
-{memory_section}
-{portfolio_status}
-
-{price_info}
-
-Available cash: ${cash:,.2f}
-Buying power: ${buying_power:,.2f}
-
-RULES:
-1. You can only trade these stocks: {', '.join(SYMBOLS)}
-2. Maximum position size: {MAX_POSITION_SIZE*100}% of portfolio per stock
-3. Consider risk management - don't go all-in
-4. You can BUY, SELL, or HOLD
-5. Apply any relevant strategy insights from your memory!
-
-Respond with EXACTLY ONE JSON object (no other text):
-{{"action": "BUY" or "SELL" or "HOLD", "symbol": "TICKER", "quantity": NUMBER, "reason": "brief reason"}}
-"""
+        memory_section = self._compose_memory_section(self.watchlist or SYMBOLS)
+        prompt = build_trading_prompt(
+            symbols=self.watchlist or SYMBOLS,
+            prices=prices,
+            portfolio_status=portfolio_status,
+            cash=cash,
+            buying_power=buying_power,
+            max_position_size=MAX_POSITION_SIZE,
+            memory_section=memory_section,
+            intro="You are Clawdbot, an AI stock trader with memory of past strategies. The rules below are enforced automatically, so do not fight them.",
+            rules=[
+                f"You can only trade these stocks: {', '.join(self.watchlist or SYMBOLS)}",
+                f"Maximum position size: {MAX_POSITION_SIZE*100}% of portfolio per stock (oversized buys are auto-trimmed)",
+                f"Stop-loss is automatic at {STOP_LOSS_PCT}% - do not issue a SELL just to cut a loser early; the system handles it",
+                f"Take-profit is automatic at +{TAKE_PROFIT_PCT}% - do not sell just to lock a small winner; the system handles it",
+                f"After a stop-out, that symbol is on a {COOLDOWN_MINUTES}-minute cooldown and buys will be rejected",
+                f"Daily kill switch flattens everything if portfolio is down {DAILY_KILL_PCT}% on the day",
+                f"Force-flat at {FORCE_FLAT_HHMM_ET} ET - do not open new positions in the last 30 minutes",
+                "You can BUY, SELL, or HOLD",
+                "Apply any relevant strategy insights from your memory!",
+            ],
+        )
 
         try:
-            # DeepSeek reasoner needs more tokens for reasoning chain
-            max_tokens = 2000 if "reasoner" in self.model else 200
-
-            # Build messages - reasoner doesn't support system message well
-            if "reasoner" in self.model:
-                messages = [
-                    {"role": "user", "content": "You are a professional stock trader. Respond with valid JSON only.\n\n" + prompt}
-                ]
-            else:
-                messages = [
-                    {"role": "system", "content": "You are a professional stock trader. Always respond with valid JSON only."},
-                    {"role": "user", "content": prompt}
-                ]
-
-            self.log(f"Waiting for {self.model}...", 'info')
-
-            response = self.openai.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens
-            )
-
-            # Get content - DeepSeek reasoner puts answer in content, reasoning in reasoning_content
-            message = response.choices[0].message
-            content = message.content
-
-            # Try reasoning_content if content is empty (some API versions)
-            if not content and hasattr(message, 'reasoning_content') and message.reasoning_content:
-                # Extract JSON from reasoning if needed
-                content = message.reasoning_content
-
-            if content is None:
-                content = ""
-            content = content.strip()
-
-            # Log raw response for debugging
-            if not content:
-                self.log(f"Empty response from {self.model}", 'warning')
-                return {"action": "HOLD", "symbol": "", "quantity": 0, "reason": "Empty response from AI"}
-
-            if '{' in content and '}' in content:
-                # Find the first complete JSON object
-                start = content.find('{')
-                depth = 0
-                end = start
-                for i, char in enumerate(content[start:], start):
-                    if char == '{':
-                        depth += 1
-                    elif char == '}':
-                        depth -= 1
-                        if depth == 0:
-                            end = i
-                            break
-                json_str = content[start:end+1]
-
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
-                    # Try to fix common issues - remove newlines, fix quotes
-                    json_str = json_str.replace('\n', ' ').replace('\r', '')
-                    # Try regex to extract action, symbol, quantity, reason
-                    import re
-                    action_match = re.search(r'"action"\s*:\s*"(\w+)"', json_str, re.IGNORECASE)
-                    symbol_match = re.search(r'"symbol"\s*:\s*"(\w*)"', json_str, re.IGNORECASE)
-                    qty_match = re.search(r'"quantity"\s*:\s*(\d+)', json_str, re.IGNORECASE)
-                    reason_match = re.search(r'"reason"\s*:\s*"([^"]*)"', json_str, re.IGNORECASE)
-
-                    if action_match:
-                        return {
-                            "action": action_match.group(1),
-                            "symbol": symbol_match.group(1) if symbol_match else "",
-                            "quantity": int(qty_match.group(1)) if qty_match else 0,
-                            "reason": reason_match.group(1) if reason_match else "Parsed from response"
-                        }
-                    self.log(f"Bad JSON: {json_str[:80]}...", 'warning')
-
-            self.log(f"Response: {content[:100]}...", 'warning')
-            return {"action": "HOLD", "symbol": "", "quantity": 0, "reason": "Could not parse response"}
-
+            return request_ai_decision(self.openai, self.model, prompt, log_fn=self.log)
         except Exception as e:
             self.log(f"AI Error: {str(e)[:100]}", 'error')
             return {"action": "HOLD", "symbol": "", "quantity": 0, "reason": f"Error: {e}"}
+
+    # ------------------------------------------------------------------
+    # Risk guardrails
+    # ------------------------------------------------------------------
+    def _now_et(self):
+        """Current time in US/Eastern. Falls back to local if zoneinfo missing."""
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            return datetime.now()
+
+    def _on_cooldown(self, symbol: str) -> bool:
+        until = self.cooldowns.get(symbol)
+        if not until:
+            return False
+        if datetime.now() >= until:
+            self.cooldowns.pop(symbol, None)
+            return False
+        return True
+
+    def _flatten_position(self, pos, reason: str, prices=None):
+        """Market-sell an entire position and tag it for memory."""
+        try:
+            qty = abs(int(float(pos.qty)))
+            if qty <= 0:
+                return
+            self.api.submit_order(
+                symbol=pos.symbol, qty=qty, side='sell',
+                type='market', time_in_force='day'
+            )
+            self.log(f"GUARDRAIL SELL {qty} {pos.symbol} - {reason}", 'trade')
+            with self._trade_lock:
+                self.trade_count += 1
+            self.update_trade_count_display()
+            if self.tracker:
+                price = float(pos.current_price) if hasattr(pos, "current_price") else 0.0
+                if prices and pos.symbol in prices:
+                    price = prices[pos.symbol]['price']
+                self.tracker.record_trade(pos.symbol, "sell", qty, price, reason)
+        except Exception as e:
+            self.log(f"Guardrail flatten failed for {pos.symbol}: {e}", 'error')
+
+    def _apply_guardrails(self, prices=None) -> bool:
+        """Pre-LLM safety pass. Returns True if the loop should skip the LLM
+        (kill switch tripped or end-of-day flatten just ran)."""
+        try:
+            account = self.api.get_account()
+            positions = self.api.list_positions()
+        except Exception as e:
+            self.log(f"Guardrail account fetch failed: {e}", 'error')
+            return False
+
+        portfolio_value = float(account.portfolio_value)
+
+        # 1) Force-flat near the close
+        if FORCE_FLAT_ENABLED and not self.force_flat_done_today:
+            now_et = self._now_et()
+            try:
+                hh, mm = [int(x) for x in FORCE_FLAT_HHMM_ET.split(":")]
+                cutoff = now_et.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if now_et >= cutoff and now_et.hour < 16 and positions:
+                    self.log(
+                        f"FORCE-FLAT @ {FORCE_FLAT_HHMM_ET} ET â€” closing "
+                        f"{len(positions)} positions",
+                        'warning'
+                    )
+                    for p in positions:
+                        self._flatten_position(p, "force-flat (EOD)", prices)
+                    self.force_flat_done_today = True
+                    self.kill_switch_tripped = True  # no more trading today
+                    return True
+            except Exception as e:
+                self.log(f"Force-flat clock error: {e}", 'warning')
+
+        # 2) Daily drawdown kill switch
+        if self.session_start_value and self.session_start_value > 0 and not self.kill_switch_tripped:
+            dd_pct = (portfolio_value - self.session_start_value) / self.session_start_value * 100.0
+            if dd_pct <= DAILY_KILL_PCT:
+                self.log(
+                    f"KILL SWITCH: portfolio {dd_pct:+.2f}% on the day "
+                    f"(threshold {DAILY_KILL_PCT}%) â€” flattening and pausing.",
+                    'error'
+                )
+                for p in positions:
+                    self._flatten_position(p, f"daily kill switch ({dd_pct:+.2f}%)", prices)
+                self.kill_switch_tripped = True
+                return True
+
+        if self.kill_switch_tripped:
+            return True
+
+        # 3) Per-position stop-loss / take-profit
+        for p in positions:
+            try:
+                pnl_pct = float(p.unrealized_plpc) * 100.0
+            except Exception:
+                continue
+            if pnl_pct <= STOP_LOSS_PCT:
+                self._flatten_position(p, f"stop-loss {pnl_pct:+.2f}%", prices)
+                self.cooldowns[p.symbol] = datetime.now() + timedelta(minutes=COOLDOWN_MINUTES)
+                self.log(f"Cooldown {COOLDOWN_MINUTES}m on {p.symbol}", 'warning')
+            elif pnl_pct >= TAKE_PROFIT_PCT:
+                self._flatten_position(p, f"take-profit {pnl_pct:+.2f}%", prices)
+
+        return False
 
     def execute_trade(self, decision, prices=None):
         """Execute trade and track for memory"""
@@ -765,28 +987,23 @@ Respond with EXACTLY ONE JSON object (no other text):
             self.log(f"Decision: HOLD - {reason}", 'info')
             return None
 
-        # Position size enforcement for buys
-        if action == 'BUY' and prices and symbol in prices:
-            try:
-                account = self.api.get_account()
-                portfolio_value = float(account.portfolio_value)
-                if portfolio_value > 0:
-                    current_value = 0
-                    for pos in self.api.list_positions():
-                        if pos.symbol == symbol:
-                            current_value = float(pos.market_value)
-                            break
-                    proposed_value = current_value + quantity * prices[symbol]['price']
-                    position_pct = proposed_value / portfolio_value
-                    if position_pct > MAX_POSITION_SIZE:
-                        max_qty = int((MAX_POSITION_SIZE * portfolio_value - current_value) / prices[symbol]['price'])
-                        if max_qty <= 0:
-                            self.log(f"REJECTED: {symbol} already at max position size ({position_pct*100:.1f}% > {MAX_POSITION_SIZE*100}%)", 'warning')
-                            return None
-                        self.log(f"WARNING: Reducing {symbol} qty from {quantity} to {max_qty} (position limit {MAX_POSITION_SIZE*100}%)", 'warning')
-                        quantity = max_qty
-            except Exception as e:
-                self.log(f"Warning: Could not check position size: {e}", 'warning')
+        # Cooldown enforcement (after a stop-out)
+        if action == 'BUY' and self._on_cooldown(symbol):
+            mins_left = max(0, int((self.cooldowns[symbol] - datetime.now()).total_seconds() / 60))
+            self.log(f"REJECTED: {symbol} on cooldown ({mins_left}m left)", 'warning')
+            return None
+
+        quantity = enforce_position_limit(
+            self.api,
+            action=action,
+            symbol=symbol,
+            quantity=quantity,
+            prices=prices,
+            max_position_size=MAX_POSITION_SIZE,
+            log_fn=self.log,
+        )
+        if quantity is None:
+            return None
 
         try:
             if action == 'BUY':
@@ -797,7 +1014,7 @@ Respond with EXACTLY ONE JSON object (no other text):
                 self.log(f"BUY ORDER: {quantity} {symbol} - {reason}", 'trade')
                 with self._trade_lock:
                     self.trade_count += 1
-                self.trade_label.config(text=f"Trades: {self.trade_count}")
+                self.update_trade_count_display()
 
                 # Track for memory
                 if self.tracker and prices and symbol in prices:
@@ -815,7 +1032,7 @@ Respond with EXACTLY ONE JSON object (no other text):
                 self.log(f"SELL ORDER: {quantity} {symbol} - {reason}", 'trade')
                 with self._trade_lock:
                     self.trade_count += 1
-                self.trade_label.config(text=f"Trades: {self.trade_count}")
+                self.update_trade_count_display()
 
                 # Track for memory
                 if self.tracker and prices and symbol in prices:
@@ -829,12 +1046,18 @@ Respond with EXACTLY ONE JSON object (no other text):
             self.log(f"Trade Error: {e}", 'error')
             return None
 
+    def update_trade_count_display(self):
+        """Refresh the trade count label safely from any thread."""
+        self._run_on_ui_thread(self.trade_label.config, text=f"Trades: {self.trade_count}")
+
+    def _set_stopped_state(self):
+        self.start_btn.config(state='normal')
+        self.provider_dropdown.config(state='readonly')
+        self.status_label.config(text="Status: STOPPED", fg='#ff6b6b')
+
     def safe_update_status(self, text, fg):
         """Thread-safe status label update"""
-        try:
-            self.root.after(0, lambda t=text, f=fg: self.status_label.config(text=t, fg=f))
-        except Exception:
-            pass
+        self._run_on_ui_thread(self.status_label.config, text=text, fg=fg)
 
     def trading_loop(self):
         """Main trading loop"""
@@ -879,9 +1102,21 @@ Respond with EXACTLY ONE JSON object (no other text):
                     color = 'info' if change >= 0 else 'error'
                     self.log(f"  {symbol}: ${data['price']:.2f} ({change:+.2f}%)", color)
 
-                # Get portfolio
+                # Pre-LLM guardrails: stop-loss / take-profit / kill switch / force-flat
+                skip_llm = self._apply_guardrails(prices)
+
+                # Get portfolio (after guardrail flattens, if any)
                 portfolio_status, cash, buying_power = self.get_portfolio_status()
                 self.update_account_display()
+
+                if skip_llm:
+                    self.log("Guardrail tripped â€” skipping LLM this cycle.", 'warning')
+                    self.log(f"\nWaiting {TRADE_INTERVAL}s until next check...", 'info')
+                    for _ in range(TRADE_INTERVAL):
+                        if not self.running:
+                            break
+                        time.sleep(1)
+                    continue
 
                 # Get AI decision
                 self.log("\nAsking AI for decision...", 'info')
@@ -996,8 +1231,14 @@ Respond with EXACTLY ONE JSON object (no other text):
         elif tag == 'saved':
             prefix = f"[{timestamp}] [SAVED] "
 
+        self._run_on_ui_thread(self._append_chat_log, prefix, message, tag)
+
+    def _append_chat_log(self, prefix, message, tag):
         self.chat_display.insert('end', f"{prefix}{message}\n", tag)
         self.chat_display.see('end')
+
+    def _set_memory_stats_text(self, text):
+        self.memory_stats_label.config(text=text)
 
     def _get_live_win_rate(self):
         """Calculate win rate from live Alpaca positions (profitable vs losing)."""
@@ -1033,11 +1274,13 @@ Respond with EXACTLY ONE JSON object (no other text):
                 parts.append(f"P/L: {pl_color}${total_pl:,.2f}")
 
             if parts:
-                self.memory_stats_label.config(text=" | ".join(parts))
+                stats_text = " | ".join(parts)
             else:
-                self.memory_stats_label.config(text="No positions open")
+                stats_text = "No positions open"
         except Exception as e:
-            self.memory_stats_label.config(text=f"Stats Error: {e}")
+            stats_text = f"Stats Error: {e}"
+
+        self._run_on_ui_thread(self._set_memory_stats_text, stats_text)
 
     def show_insights(self):
         """Show current strategy insights"""

@@ -106,8 +106,8 @@ def load_all_price_files(data_dir, is_crypto=False, is_astock=False):
         # For crypto, data_dir should already point to the crypto folder
         price_dir = Path(data_dir) / 'coin'
     elif is_astock:
-        # A-stock data is in A_stock_data subdirectory
-        price_dir = Path(data_dir) / 'A_stock_data'
+        # Legacy branch kept for compatibility with older data layouts.
+        price_dir = Path(data_dir) / 'legacy_price_data'
         if not price_dir.exists():
             # Fallback to parent directory
             price_dir = Path(data_dir)
@@ -331,8 +331,6 @@ def main():
     if len(price_data) == 0:
         print("ERROR: No price data loaded! Check your --data-dir path.")
         print(f"Looking in: {args.data_dir}")
-        if is_astock:
-            print("For A-stock, try: --data-dir data/A_stock")
         return
 
     # Calculate portfolio values
